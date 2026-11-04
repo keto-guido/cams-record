@@ -6,7 +6,7 @@ WITH s AS (
   SELECT camera_id, quality, start_ts, end_ts,
          LAG(end_ts) OVER (PARTITION BY camera_id, quality ORDER BY start_ts) AS prev_end
   FROM segments
-  WHERE missing = 0
+  WHERE missing = 0 AND deleted_at IS NULL
     AND start_ts >= UTC_DATE() - INTERVAL 7 DAY
 )
 SELECT camera_id,
@@ -26,7 +26,7 @@ ORDER BY camera_id, quality, day_utc;
 -- The individual gaps (largest first), to correlate with recorder restarts in the logs:
 -- WITH s AS (SELECT camera_id, quality, start_ts,
 --                   LAG(end_ts) OVER (PARTITION BY camera_id, quality ORDER BY start_ts) AS prev_end
---            FROM segments WHERE missing = 0 AND start_ts >= UTC_DATE() - INTERVAL 7 DAY)
+--            FROM segments WHERE missing = 0 AND deleted_at IS NULL AND start_ts >= UTC_DATE() - INTERVAL 7 DAY)
 -- SELECT camera_id, quality, prev_end AS gap_from_utc, start_ts AS gap_to_utc,
 --        ROUND(TIMESTAMPDIFF(MICROSECOND, prev_end, start_ts) / 1e6, 1) AS gap_s
 -- FROM s WHERE TIMESTAMPDIFF(MICROSECOND, prev_end, start_ts) > 1000000

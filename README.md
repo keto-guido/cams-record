@@ -1,8 +1,8 @@
 # cams-record
 
-Phase 1 of the self-hosted NVR on the Synology DVA3221 ("Jefferson"): a **headless continuous
-recorder** that writes 60 s MP4 segments from go2rtc and indexes them in the NAS's **MariaDB**.
-There is no UI, retention or playback yet.
+The self-hosted NVR on the Synology DVA3221 ("Jefferson"): a **headless continuous recorder** that
+writes 60 s MP4 segments from go2rtc, indexes them in the NAS's **MariaDB** and enforces
+**retention**. There is no UI or playback yet.
 
 - One supervised `ffmpeg` per (camera, quality), reading go2rtc RTSP
   (`rtsp://127.0.0.1:8554/<stream>`, host network). It **stream-copies only** and never
@@ -16,6 +16,8 @@ There is no UI, retention or playback yet.
   `/api/metrics`).
 - Disk guard: main stops below `recording.min_free_gb` and sub below half of it, until free space
   is back above `recording.resume_free_gb` (see [Disk guard](#disk-guard)).
+- Retention: a low-priority janitor deletes segments by age and by a total size budget. It starts
+  in dry-run mode and deletes nothing until you turn that off (see [Retention](#retention)).
 - HEVC sources get `-tag:v hvc1`, so Safari can play the MP4s.
 - Startup reconcile: files on disk without a row are inserted, and rows whose file is gone get
   `missing=1`.
@@ -27,6 +29,7 @@ There is no UI, retention or playback yet.
 - [Layout and timestamps](#layout-and-timestamps)
 - [Configuration](#configuration)
 - [Disk guard](#disk-guard)
+- [Retention](#retention)
 - [Database](#database)
 - [Deploy (Jefferson)](#deploy-jefferson)
 - [Rollout and acceptance](#rollout-and-acceptance)
@@ -54,7 +57,7 @@ There is no UI, retention or playback yet.
   the next hour directory ahead of time.
 - If ffmpeg is killed while a segment is open, that file has no `moov` atom. The supervisor
   still probes it. When it cannot be read it is renamed `*.mp4.bad`, so it is never silently
-  left without a row. Nothing is ever deleted.
+  left without a row. Retention never touches these files, because they have no row.
 
 ## Configuration
 
@@ -81,6 +84,13 @@ cameras:
 | `recording.audio` | `auto` | `auto` = copy AAC audio, drop any other codec; `off` |
 | `recording.min_free_gb` | `200` | decimal GB; see [Disk guard](#disk-guard); `0` disables the guard |
 | `recording.resume_free_gb` | `250` | must be >= `min_free_gb` |
+| `retention.dry_run` | `true` | log and report only; see [Retention](#retention) |
+| `retention.main_days` / `sub_days` | `3` / `14` | > 0, fractions allowed |
+| `retention.cameras.<id>.main_days` / `sub_days` | | optional per-camera overrides |
+| `retention.max_total_gb` | `1500` | decimal GB of indexed segments |
+| `retention.interval_s` | `300` | seconds between passes |
+| `retention.batch_size` | `500` | most segments handled per pass |
+| `retention.nice` | `19` | 0 to 19, janitor thread only |
 | `go2rtc.rtsp_url` | `rtsp://127.0.0.1:8554/{stream}` | |
 | `db.host` / `port` / `database` / `user` | `127.0.0.1` / `3306` / `cams_record` / `cams_record` | env `DB_HOST`, `DB_PORT`, … |
 | `db.password_file` | `/run/secrets/db_password` | |
@@ -108,8 +118,60 @@ The free space on `recording.root` is checked every 30 s, and again before each 
 - **No recorder starts below the minimum.** If the service starts below `min_free_gb`, main and
   sub both stay in `disk_full` until free space is above `resume_free_gb`. A sub that is already
   recording can still restart its ffmpeg (after a go2rtc hiccup, say) until the 100 GB limit.
-- Nothing deletes recordings yet, so recording only resumes after you free space yourself.
+- When the guard trips, the [retention janitor](#retention) runs a pass at once. That pass follows
+  the normal rules, so it frees nothing in dry-run mode or when no segment is past its limits.
+  Recording then only resumes after you free space yourself.
 - If the free space cannot be read, the guard logs a warning and keeps its current state.
+
+## Retention
+
+**A new install deletes nothing.** `retention.dry_run` defaults to `true`, so the janitor only logs
+and reports what it would delete. To go live, watch a few passes, set `dry_run: false` in
+`config/config.yaml` and restart.
+
+```
+retention dry-run: would delete 500 segments (21.34 GB) [age main=500 sub=0, budget main=0 sub=0]
+```
+
+Every `interval_s`, the janitor selects up to `batch_size` segments, oldest first:
+
+1. **Age rule:** segments that started more than `main_days` / `sub_days` ago. Per-camera overrides
+   apply, and cameras no longer in `cameras.yaml` use the global values.
+2. **Budget rule:** while the indexed total is above `max_total_gb`, the oldest **main** segments,
+   and then the oldest **sub** segments once no main segment can go.
+
+A backlog larger than `batch_size` drains over several passes. A dry run reports one batch per pass
+too; `batch_full` in its result means there is more.
+
+Footage that is never deleted:
+
+- **Protected segments**, under any rule. Protect footage with SQL for now:
+
+  ```sql
+  UPDATE segments SET protected = 1
+  WHERE camera_id = 'front-door' AND start_ts BETWEEN '2026-11-04 21:00:00' AND '2026-11-04 21:10:00';
+  ```
+
+  Protected bytes still count towards `max_total_gb`. If they alone exceed it, the janitor deletes
+  all it may and logs a warning on each pass.
+- **Recent segments:** anything that ended within the last 2 × `segment_time`.
+- **Anything without a row.** The janitor never walks the disk, so `*.mp4.bad` and stray files stay.
+- **Rows with an unsafe path.** The file must be strictly inside the real recording root, reached
+  through no symlink at all, a regular file, and end in `.mp4`. Any other row is logged, counted in
+  `skipped_total` and retried an hour later.
+
+Deleting a segment unlinks the file, then sets `deleted_at` on its row (50 rows per transaction).
+Rows are kept, hidden from every query and total. If the file is already gone, the row is still
+marked. Rows with `missing=1` do not count towards the budget because they use no disk, but the age
+rule retires them. Date directories left empty are removed bottom-up. `<camera>/<quality>` and the
+hours around the current one stay, because recorders are using them.
+
+When the [disk guard](#disk-guard) trips, a pass runs at once. While the guard stays tripped and
+passes keep filling their batch, one more pass runs every 30 s. These urgent passes apply exactly
+the same rules, including `dry_run`: they run sooner, they do not delete more.
+
+`/api/status` has a `retention` object, and `/api/metrics` has `cams_record_retention_*`. See
+[HTTP API](#http-api). Byte totals come from the last pass, so they are up to `interval_s` old.
 
 ## Database
 
@@ -119,11 +181,13 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | table | purpose |
 |---|---|
 | `recorder_cameras` | camera config mirror: `id` (= `cams_detect.cameras.camera_id`), streams, flags |
-| `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing` |
+| `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing, protected, deleted_at` |
 | `recorder_status` | per (camera, quality): `state, last_segment_ts, restarts_24h, last_error` |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
-end_ts)`, `INDEX(end_ts)` and `INDEX(path)`. The path index makes reconcile lookups cheap.
+end_ts)`, `INDEX(end_ts)`, `INDEX(path)` and `INDEX(deleted_at, quality, start_ts)`. The path index
+makes reconcile lookups cheap, and the last one serves the janitor. Queries of your own should add
+`deleted_at IS NULL`.
 
 ## Deploy (Jefferson)
 
@@ -195,7 +259,7 @@ end_ts)`, `INDEX(end_ts)` and `INDEX(path)`. The path index makes reconcile look
    sudo docker compose logs -f cams-record
    ```
 
-   You should see `mariadb: applied schema migration v1`,
+   You should see `mariadb: applied schema migration v1` (and `v2`),
    `front-door/main: recording rtsp://127.0.0.1:8554/front-door-main …` and, after about a minute,
    rows in `segments`.
 
@@ -232,7 +296,7 @@ cd /volume1/docker/cams-record && git pull && sudo DOCKER_BUILDKIT=0 docker comp
      ```
 
      ```sql
-     SELECT COUNT(*) FROM segments WHERE camera_id='front-door' AND missing=0;
+     SELECT COUNT(*) FROM segments WHERE camera_id='front-door' AND missing=0 AND deleted_at IS NULL;
      ```
 
    - Restarts: `SELECT * FROM recorder_status;` (`restarts_24h` should be about 0 on a healthy
@@ -249,7 +313,7 @@ WITH s AS (
   SELECT camera_id, quality, start_ts, end_ts,
          LAG(end_ts) OVER (PARTITION BY camera_id, quality ORDER BY start_ts) AS prev_end
   FROM segments
-  WHERE missing = 0
+  WHERE missing = 0 AND deleted_at IS NULL
     AND start_ts >= UTC_DATE() - INTERVAL 7 DAY
 )
 SELECT camera_id,
@@ -299,8 +363,20 @@ These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is
 | route | auth | |
 |---|---|---|
 | `GET /healthz` | none | `{"ok": true}`; used by the Docker healthcheck |
-| `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile |
-| `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog |
+| `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile, `retention` (below) |
+| `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog, `cams_record_retention_*` |
+
+`retention` in `/api/status`:
+
+| key | |
+|---|---|
+| `settings` | `dry_run`, `main_days`, `sub_days`, `max_total_gb`, `interval_s`, `batch_size`, `cameras` |
+| `total_bytes`, `totals_ts` | indexed bytes on disk, and when that was last computed |
+| `streams[]` | per camera and quality: `bytes`, `protected_bytes`, `segments`, `oldest_start_ts` |
+| `last_run` | `ts`, `duration_s`, `result` (`ok`, `dry_run`, `error`), `urgent`, per-rule counts `age_main`, `age_sub`, `budget_main`, `budget_sub`, and `error` on failure |
+| `deleted` | `total_segments`, `total_bytes` since start, `last_segments`, `last_bytes` for the last pass |
+| `would_delete` | the last dry run: `segments`, `bytes`, per-rule counts, `batch_full`, `ts` |
+| `skipped_total`, `errors_total` | rows refused by the path checks, failed passes |
 
 Auth trusts only the `x-apphub-token` header. The value must be an HS256 JWT signed with the
 App Hub secret (`/run/secrets/apphub_jwt`), with `exp` set and a `roles` claim that contains

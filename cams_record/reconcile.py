@@ -86,7 +86,7 @@ def reconcile(root: str, db: Database, indexer: Indexer, cutoff: float | None = 
     marked = db.mark_missing(missing_ids) if missing_ids else 0
 
     def back(cur):
-        cur.execute("SELECT id, path FROM segments WHERE missing = 1")
+        cur.execute("SELECT id, path FROM segments WHERE missing = 1 AND deleted_at IS NULL")
         return [rid for rid, p in cur.fetchall() if os.path.exists(os.path.join(root, p))]
 
     found = db.run(back)

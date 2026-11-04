@@ -13,6 +13,16 @@ recording:
   audio: auto            # auto = copy audio only when the source track is AAC; off = video only
   min_free_gb: 200       # below: stop main, keep sub; below half of this: stop sub too; 0 disables
   resume_free_gb: 250    # resume once free space is back above this
+retention:
+  dry_run: true          # log and report what would be deleted, delete nothing; false = really delete
+  main_days: 3
+  sub_days: 14
+  max_total_gb: 1500     # budget for indexed bytes; over it the oldest main, then sub, is deleted
+  interval_s: 300
+  batch_size: 500        # most segments handled per pass
+  nice: 19               # janitor thread only
+  # cameras:             # optional per-camera overrides
+  #   front-door: {main_days: 7, sub_days: 30}
 auth:
   mode: jwt              # jwt | none (none only for local testing)
   secret_file: /run/secrets/apphub_jwt

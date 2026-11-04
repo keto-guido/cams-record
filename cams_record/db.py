@@ -66,6 +66,13 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             PRIMARY KEY (camera_id, quality)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     ]),
+    (2, [
+        # IF NOT EXISTS: a retry after a read timeout must not fail on an ALTER that did finish.
+        """ALTER TABLE segments
+            ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL,
+            ADD KEY IF NOT EXISTS idx_segments_retention (deleted_at, quality, start_ts)""",
+    ]),
 ]
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "schema_version")
@@ -185,21 +192,21 @@ class Database:
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON DUPLICATE KEY UPDATE end_ts=VALUES(end_ts), duration_ms=VALUES(duration_ms),
                  path=VALUES(path), size_bytes=VALUES(size_bytes), codec=VALUES(codec), width=VALUES(width),
-                 height=VALUES(height), fps=VALUES(fps), missing=0""", params))
+                 height=VALUES(height), fps=VALUES(fps), missing=0, deleted_at=NULL""", params))
 
     def paths_with_prefix(self, prefix: str) -> set[str]:
         like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
         def q(cur):
-            cur.execute("SELECT path FROM segments WHERE path LIKE %s", (like,))
+            cur.execute("SELECT path FROM segments WHERE path LIKE %s AND deleted_at IS NULL", (like,))
             return {r[0] for r in cur.fetchall()}
 
         return self.run(q)
 
     def present_rows(self, after_id: int, limit: int = 5000) -> list[tuple[int, str]]:
         def q(cur):
-            cur.execute("SELECT id, path FROM segments WHERE id > %s AND missing = 0 ORDER BY id LIMIT %s",
-                        (int(after_id), int(limit)))
+            cur.execute("""SELECT id, path FROM segments WHERE id > %s AND missing = 0 AND deleted_at IS NULL
+                           ORDER BY id LIMIT %s""", (int(after_id), int(limit)))
             return list(cur.fetchall())
 
         return self.run(q)
@@ -216,7 +223,8 @@ class Database:
     def list_segments(self, camera_id: str, quality: str, limit: int = 1000) -> list[dict]:
         def q(cur):
             cur.execute("""SELECT id, start_ts, end_ts, duration_ms, path, size_bytes, codec, width, height, fps,
-                                  missing FROM segments WHERE camera_id=%s AND quality=%s
+                                  missing FROM segments
+                           WHERE camera_id=%s AND quality=%s AND deleted_at IS NULL
                            ORDER BY start_ts LIMIT %s""", (camera_id, quality, int(limit)))
             return cur.fetchall()
 
@@ -224,6 +232,65 @@ class Database:
                  "path": r[4], "size_bytes": r[5], "codec": r[6], "width": r[7], "height": r[8],
                  "fps": float(r[9]) if r[9] is not None else None, "missing": bool(r[10])}
                 for r in self.run(q)]
+
+    # -- retention ---------------------------------------------------------
+    def oldest_segments(self, quality: str, end_before: float, limit: int, camera_id: str | None = None,
+                        start_before: float | None = None, present_only: bool = False) -> list[dict]:
+        """Deletable segments, oldest first: never protected, never deleted, closed before ``end_before``."""
+        where = ["deleted_at IS NULL", "protected = 0", "quality = %s", "end_ts < %s"]
+        params: list = [quality, to_dt(end_before)]
+        if camera_id is not None:
+            where.append("camera_id = %s")
+            params.append(camera_id)
+        if start_before is not None:
+            where.append("start_ts < %s")
+            params.append(to_dt(start_before))
+        if present_only:
+            where.append("missing = 0")
+
+        def q(cur):
+            cur.execute(f"""SELECT id, camera_id, quality, start_ts, path, size_bytes, missing FROM segments
+                            WHERE {" AND ".join(where)} ORDER BY start_ts, id LIMIT %s""", (*params, int(limit)))
+            return cur.fetchall()
+
+        return [{"id": r[0], "camera_id": r[1], "quality": r[2], "start_ts": from_dt(r[3]), "path": r[4],
+                 "size_bytes": r[5], "missing": bool(r[6])} for r in self.run(q)]
+
+    def segment_totals(self) -> list[dict]:
+        """Per (camera, quality): non-deleted rows; segment and byte counts cover files on disk only."""
+        def q(cur):
+            cur.execute("""SELECT camera_id, quality, SUM(missing = 0), SUM(IF(missing = 0, size_bytes, 0)),
+                                  SUM(IF(missing = 0 AND protected = 1, size_bytes, 0)),
+                                  MIN(IF(missing = 0, start_ts, NULL))
+                           FROM segments WHERE deleted_at IS NULL
+                           GROUP BY camera_id, quality ORDER BY camera_id, quality""")
+            return cur.fetchall()
+
+        return [{"camera_id": r[0], "quality": r[1], "segments": int(r[2]), "bytes": int(r[3]),
+                 "protected_bytes": int(r[4]), "oldest_start_ts": from_dt(r[5])} for r in self.run(q)]
+
+    def mark_deleted(self, ids: list[int]) -> int:
+        """Set deleted_at on these rows in one transaction, in id order."""
+        ids = sorted(ids)
+        if not ids:
+            return 0
+        marks = ",".join(["%s"] * len(ids))
+
+        def q(cur):
+            self._conn.begin()
+            try:
+                n = cur.execute(f"UPDATE segments SET deleted_at = NOW() WHERE id IN ({marks}) "
+                                "AND deleted_at IS NULL ORDER BY id", ids)
+                self._conn.commit()
+                return n
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:  # noqa: BLE001 - the connection itself may be gone
+                    pass
+                raise
+
+        return self.run(q)
 
     # -- status ------------------------------------------------------------
     def upsert_status(self, rows: list[dict]) -> None:

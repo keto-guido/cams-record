@@ -1,4 +1,4 @@
-"""Wires config, database, indexer, recorders and the startup reconcile together."""
+"""Wires config, database, indexer, recorders, retention and the startup reconcile together."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ import time
 from . import __version__
 from .config import CameraConfig, stream_url
 from .db import Database, DBUnavailable
-from .diskguard import CHECK_INTERVAL, DiskGuard
+from .diskguard import CHECK_INTERVAL, LEVEL_OK, DiskGuard
 from .indexer import Indexer
 from .reconcile import reconcile
 from .recorder import StreamRecorder
+from .retention import Janitor
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ class Service:
                 url = stream_url(cfg["go2rtc"]["rtsp_url"], stream)
                 rec = StreamRecorder(cam.id, quality, url, self.rec_cfg, self.indexer, self.guard)
                 self.recorders[rec.key] = rec
+        self.janitor = Janitor(db, self.root, cfg["retention"], int(self.rec_cfg["segment_time"]))
+        self._guard_seen = LEVEL_OK
         self.started_at = time.time()
         self.reconcile_result: dict | None = None
         self._stop = threading.Event()
@@ -50,13 +53,24 @@ class Service:
         log.info("cams-record %s: %d streams on %d cameras -> %s", __version__, len(self.recorders),
                  sum(1 for c in self.cameras.values() if c.streams()), self.root)
         if self.db is not None:
+            self.janitor.start()
             self._bg = threading.Thread(target=self._startup_db, args=(run_reconcile,), name="startup-db",
                                         daemon=True)
             self._bg.start()
 
     def _guard_loop(self) -> None:
         while not self._stop.wait(CHECK_INTERVAL):
-            self.guard.check()
+            self._guard_tick()
+
+    def _guard_tick(self) -> None:
+        """Check the disk; run the janitor at once when the guard trips, and while it stays tripped with a backlog.
+
+        Recorders call ``guard.check()`` too, so the level is compared with what this loop saw last.
+        """
+        level = self.guard.check()
+        if level > self._guard_seen or (level > LEVEL_OK and self.janitor.backlog):
+            self.janitor.trigger()
+        self._guard_seen = level
 
     def _startup_db(self, run_reconcile: bool) -> None:
         """Sync recorder_cameras and run the reconcile once the DB is reachable (retries with backoff)."""
@@ -79,6 +93,7 @@ class Service:
         self._stop.set()
         if self._guard_thread is not None:
             self._guard_thread.join(timeout=5)
+        self.janitor.stop()
         for rec in self.recorders.values():
             rec.stop()
         for rec in self.recorders.values():
@@ -111,6 +126,7 @@ class Service:
                         "probe_errors": self.indexer.probe_errors, "db_errors": self.indexer.db_errors},
             "db": self.db.status() if self.db is not None else None,
             "reconcile": self.reconcile_result,
+            "retention": self.janitor.status(),
         }
 
     def metrics_text(self) -> str:
@@ -136,4 +152,5 @@ class Service:
         if "free_gb" in d:
             lines.append(f"cams_record_disk_free_bytes {int(d['free_gb'] * 1e9)}")
         lines.append(f"cams_record_index_pending {self.indexer.pending()}")
+        lines.extend(self.janitor.metrics_lines())
         return "\n".join(lines) + "\n"

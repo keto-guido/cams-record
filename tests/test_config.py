@@ -90,3 +90,30 @@ def test_stream_url():
     assert stream_url(t, "front-door") == "rtsp://127.0.0.1:8554/front-door"
     assert stream_url(t, "/clips/a.mp4") == "/clips/a.mp4"
     assert stream_url(t, "rtsp://cam/x") == "rtsp://cam/x"
+
+
+def test_retention_defaults_are_safe(tmp_path):
+    write(tmp_path, {})
+    cfg, _ = load_config(tmp_path, env={})
+    ret = cfg["retention"]
+    assert ret["dry_run"] is True
+    assert (ret["main_days"], ret["sub_days"], ret["max_total_gb"]) == (3, 14, 1500)
+    assert (ret["interval_s"], ret["batch_size"], ret["cameras"]) == (300, 500, {})
+
+
+def test_retention_camera_overrides(tmp_path):
+    write(tmp_path, {}, {"retention": {"cameras": {"garage": {"main_days": 0.5}}}})
+    cfg, _ = load_config(tmp_path, env={})
+    assert cfg["retention"]["cameras"] == {"garage": {"main_days": 0.5}}
+    assert cfg["retention"]["sub_days"] == 14  # deep merge keeps the other defaults
+
+
+@pytest.mark.parametrize("ret", [{"dry_run": "false"}, {"main_days": 0}, {"sub_days": -1}, {"main_days": "3"},
+                                 {"max_total_gb": 0}, {"interval_s": 0}, {"batch_size": 0}, {"batch_size": 1.5},
+                                 {"nice": 20}, {"nice": -1}, {"cameras": ["garage"]},
+                                 {"cameras": {"garage": {"main_day": 1}}}, {"cameras": {"garage": {"sub_days": 0}}},
+                                 {"cameras": {"garage": 3}}])
+def test_invalid_retention(tmp_path, ret):
+    write(tmp_path, {}, {"retention": ret})
+    with pytest.raises(ValueError):
+        load_config(tmp_path, env={})

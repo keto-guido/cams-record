@@ -8,7 +8,7 @@ import pytest
 
 from cams_record.indexer import Indexer, SegmentJob, build_row
 from cams_record.reconcile import reconcile
-from cams_record.segments import rel_path_for
+from cams_record.segments import rel_path_for, to_dt
 from tests.conftest import make_clip, needs_ffmpeg
 
 T = calendar.timegm((2026, 11, 4, 21, 32, 0, 0, 0, 0))
@@ -76,6 +76,60 @@ def test_paths_with_prefix_escapes_like(db):
     db.insert_segment(row(cam="a_b"))
     db.insert_segment(row(cam="axb"))
     assert db.paths_with_prefix("a_b/main/") == {rel_path_for("a_b", "main", T)}
+
+
+def test_migration_2_upgrades_a_v1_table(db):
+    from cams_record.db import MIGRATIONS
+
+    def to_v1(cur):
+        cur.execute("ALTER TABLE segments DROP INDEX idx_segments_retention, DROP COLUMN protected, "
+                    "DROP COLUMN deleted_at")
+        cur.execute("DELETE FROM schema_version WHERE version > 1")
+        cur.execute("""INSERT INTO segments (camera_id, quality, start_ts, end_ts, duration_ms, path, size_bytes)
+                       VALUES ('c', 'main', '2026-11-04 21:32:00', '2026-11-04 21:33:00', 60000, 'x.mp4', 5)""")
+
+    db.run(to_v1)
+    db.ready = False
+    assert db.ensure_schema() == MIGRATIONS[-1][0]
+    rows = db.run(lambda cur: (cur.execute("SELECT protected, deleted_at FROM segments"), cur.fetchall())[1])
+    assert rows == ((0, None),)
+    keys = db.run(lambda cur: (cur.execute("SHOW INDEX FROM segments WHERE Key_name = 'idx_segments_retention'"),
+                               [r[4] for r in cur.fetchall()])[1])
+    assert keys == ["deleted_at", "quality", "start_ts"]
+    for stmt in MIGRATIONS[-1][1]:  # safe to retry after a timeout
+        db.run(lambda cur, s=stmt: cur.execute(s))
+
+
+def test_deleted_rows_are_hidden_and_reindexing_revives_them(db):
+    db.insert_segment(row())
+    db.insert_segment(row(start=T + 60))
+    gone, kept = sorted(s["id"] for s in db.list_segments("front-door", "main"))
+    assert db.mark_deleted([gone]) == 1
+    assert db.mark_deleted([gone]) == 0
+    marked, now = db.run(lambda cur: (cur.execute("SELECT deleted_at, UTC_TIMESTAMP() FROM segments WHERE id = %s",
+                                                  (gone,)), cur.fetchone())[1])
+    assert abs((now - marked).total_seconds()) < 5  # NOW() is UTC in this session
+    assert [s["id"] for s in db.list_segments("front-door", "main")] == [kept]
+    assert db.paths_with_prefix("front-door/main/") == {rel_path_for("front-door", "main", T + 60)}
+    assert [r[0] for r in db.present_rows(0)] == [kept]
+    assert [t["segments"] for t in db.segment_totals()] == [1]
+    assert [s["id"] for s in db.oldest_segments("main", T + 3600, 10)] == [kept]
+    db.insert_segment(row())  # reconcile found the file on disk after all
+    assert len(db.list_segments("front-door", "main")) == 2
+
+
+def test_segment_totals_cover_files_on_disk(db):
+    db.insert_segment(row(size_bytes=100))
+    db.insert_segment(row(start=T + 60, size_bytes=10))
+    db.insert_segment(row(start=T + 120, size_bytes=1))
+    db.insert_segment(row(start=T - 60, cam="gone", size_bytes=7))
+    db.run(lambda cur: cur.execute("UPDATE segments SET missing = 1 WHERE start_ts < %s", (to_dt(T + 1),)))
+    db.run(lambda cur: cur.execute("UPDATE segments SET protected = 1 WHERE size_bytes = 1"))
+    assert db.segment_totals() == [
+        {"camera_id": "front-door", "quality": "main", "segments": 2, "bytes": 11, "protected_bytes": 1,
+         "oldest_start_ts": T + 60},
+        {"camera_id": "gone", "quality": "main", "segments": 0, "bytes": 0, "protected_bytes": 0,
+         "oldest_start_ts": None}]  # listed all the same, so the age rule can retire the row
 
 
 def test_build_row_prefers_segment_list_times():

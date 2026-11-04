@@ -53,6 +53,16 @@ DEFAULTS: dict[str, Any] = {
         "min_free_gb": 200,  # below: stop main; below half of it: stop sub as well; 0 disables
         "resume_free_gb": 250,  # resume once free space is back above this
     },
+    "retention": {
+        "main_days": 3,
+        "sub_days": 14,
+        "cameras": {},  # per-camera overrides: <id>: {main_days: 7, sub_days: 30}
+        "max_total_gb": 1500,  # budget for indexed bytes; over it the oldest main, then sub, is deleted
+        "dry_run": True,  # log and report what would be deleted, delete nothing
+        "interval_s": 300,
+        "batch_size": 500,  # most segments handled per pass
+        "nice": 19,  # janitor thread only
+    },
     "auth": {
         "mode": "jwt",  # jwt | none
         "secret_file": "/run/secrets/apphub_jwt",
@@ -218,6 +228,31 @@ def parse_cameras(data: dict) -> dict[str, CameraConfig]:
     return {str(cid): resolve_camera(str(cid), r) for cid, r in raw.items()}
 
 
+def _positive(name: str, value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ValueError(f"{name} must be a number > 0")
+
+
+def _validate_retention(ret: dict) -> None:
+    if not isinstance(ret["dry_run"], bool):
+        raise ValueError("retention.dry_run must be true or false")
+    for key in ("main_days", "sub_days", "max_total_gb", "interval_s"):
+        _positive(f"retention.{key}", ret[key])
+    if type(ret["batch_size"]) is not int or ret["batch_size"] < 1:
+        raise ValueError("retention.batch_size must be an integer >= 1")
+    if type(ret["nice"]) is not int or not 0 <= ret["nice"] <= 19:
+        raise ValueError("retention.nice must be an integer from 0 to 19")
+    cameras = ret.get("cameras") or {}
+    if not isinstance(cameras, dict):
+        raise ValueError("retention.cameras must be a mapping of id -> overrides")
+    for cam_id, override in cameras.items():
+        if not isinstance(override, dict) or set(override) - {"main_days", "sub_days"}:
+            raise ValueError(f"retention.cameras.{cam_id}: only main_days and sub_days can be set")
+        for key, value in override.items():
+            _positive(f"retention.cameras.{cam_id}.{key}", value)
+    ret["cameras"] = {str(cam_id): override for cam_id, override in cameras.items()}
+
+
 def validate(cfg: dict) -> dict:
     cfg["base_path"] = normalize_base_path(cfg.get("base_path"))
     if cfg["auth"]["mode"] not in ("jwt", "none"):
@@ -231,6 +266,7 @@ def validate(cfg: dict) -> dict:
         raise ValueError("recording.backoff_initial must be > 0 and <= backoff_max")
     if float(rec["min_free_gb"]) < 0 or float(rec["resume_free_gb"]) < float(rec["min_free_gb"]):
         raise ValueError("recording.min_free_gb must be >= 0 and <= resume_free_gb")
+    _validate_retention(cfg["retention"])
     return cfg
 
 
