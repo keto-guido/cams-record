@@ -1,0 +1,45 @@
+# cams-record on Synology DSM 7 (Container Manager / docker compose 2.20, Docker 24).
+# Build: DOCKER_BUILDKIT=0 docker compose build
+services:
+  cams-record:
+    build:
+      context: .
+    image: cams-record:latest
+    container_name: cams-record
+    restart: unless-stopped
+    network_mode: host            # reach go2rtc at 127.0.0.1:8554, MariaDB at 127.0.0.1:3306; bind 127.0.0.1:8099
+    environment:
+      TZ: America/Chicago         # logs only; file names and DB times are UTC
+      HTTP_HOST: 127.0.0.1
+      HTTP_PORT: "8099"
+      BASE_PATH: /cams-record
+      RECORD_ROOT: /volume1/nvr
+      # DB_HOST: 127.0.0.1
+      # DB_PORT: "3306"
+    volumes:
+      - /volume1/nvr:/volume1/nvr
+      - ./config:/config:ro
+    secrets:
+      - db_password
+      - apphub_jwt
+    # Synology's kernel lacks CFS quota support, so `cpus:` fails there; use a relative CPU weight.
+    cpu_shares: 256
+    mem_limit: 256m
+    stop_grace_period: 30s        # lets every ffmpeg finalize its open segment
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  db_password:
+    file: ./secrets/db_password    # MariaDB password for user cams_record
+  apphub_jwt:
+    file: ./secrets/apphub_jwt     # same secret file the App Hub signs tokens with

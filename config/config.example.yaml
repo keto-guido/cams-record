@@ -1,0 +1,23 @@
+# cams-record global settings (optional; every key has a default). Copy to config/config.yaml.
+log_level: INFO
+base_path: /cams-record
+http: {host: 127.0.0.1, port: 8099}
+go2rtc:
+  rtsp_url: rtsp://127.0.0.1:8554/{stream}
+recording:
+  root: /volume1/nvr
+  segment_time: 60       # seconds
+  stall_factor: 3        # restart ffmpeg when no segment closed in 3 x segment_time
+  backoff_initial: 1     # restart backoff 1 s .. 60 s
+  backoff_max: 60
+  audio: auto            # auto = copy audio only when the source track is AAC; off = video only
+auth:
+  mode: jwt              # jwt | none (none only for local testing)
+  secret_file: /run/secrets/apphub_jwt
+  roles: [admin]
+db:
+  host: 127.0.0.1        # the NAS's MariaDB 10 (host networking)
+  port: 3306
+  database: cams_record
+  user: cams_record
+  password_file: /run/secrets/db_password

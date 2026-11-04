@@ -1,0 +1,150 @@
+"""MariaDB tests: schema, segment insert/upsert, reconcile. Set CAMS_TEST_DB_* (CI uses a mariadb:10.11 service)."""
+
+import calendar
+import os
+import shutil
+
+import pytest
+
+from cams_record.indexer import Indexer, SegmentJob, build_row
+from cams_record.reconcile import reconcile
+from cams_record.segments import rel_path_for
+from tests.conftest import make_clip, needs_ffmpeg
+
+T = calendar.timegm((2026, 11, 4, 21, 32, 0, 0, 0, 0))
+
+
+def row(start=T, dur=60.0, cam="front-door", q="main", **kw):
+    r = {"camera_id": cam, "quality": q, "start_ts": start, "end_ts": start + dur, "duration_ms": int(dur * 1000),
+         "path": rel_path_for(cam, q, start), "size_bytes": 1234, "codec": "h264", "width": 1920, "height": 1080,
+         "fps": 15.0}
+    r.update(kw)
+    return r
+
+
+def test_schema_version(db):
+    from cams_record.db import MIGRATIONS
+
+    assert db.schema_version == MIGRATIONS[-1][0]
+    v = db.run(lambda cur: (cur.execute("SELECT MAX(version) FROM schema_version"), cur.fetchone()[0])[1])
+    assert v == MIGRATIONS[-1][0]
+    db.ready = False  # re-running migrations is a no-op
+    assert db.ensure_schema() == v
+
+
+def test_insert_and_read_utc_ms(db):
+    db.insert_segment(row(start=T + 0.25, dur=59.5))
+    (s,) = db.list_segments("front-door", "main")
+    assert s["start_ts"] == pytest.approx(T + 0.25)
+    assert s["end_ts"] == pytest.approx(T + 59.75)
+    assert s["duration_ms"] == 59500 and s["fps"] == 15.0 and not s["missing"]
+    raw = db.run(lambda cur: (cur.execute("SELECT start_ts, has_motion, keep_until FROM segments"), cur.fetchone())[1])
+    assert raw[0].strftime("%Y-%m-%d %H:%M:%S.%f") == "2026-11-04 21:32:00.250000"  # stored as UTC
+    assert raw[1] == 0 and raw[2] is None
+
+
+def test_unique_camera_quality_start_upserts(db):
+    db.insert_segment(row())
+    db.insert_segment(row(size_bytes=999, dur=61))
+    db.insert_segment(row(q="sub"))
+    main = db.list_segments("front-door", "main")
+    assert len(main) == 1 and main[0]["size_bytes"] == 999 and main[0]["duration_ms"] == 61000
+    assert len(db.list_segments("front-door", "sub")) == 1
+
+
+def test_upsert_cameras_and_status(db):
+    from cams_record.config import resolve_camera
+
+    cams = [resolve_camera("front-door", {"main_stream": "front-door", "sub_stream": "front-door-sub"}),
+            resolve_camera("garage", {"enabled": False})]
+    db.upsert_cameras(cams)
+    db.upsert_cameras(cams[:1])
+    rows = db.run(lambda cur: (cur.execute("SELECT id, sub_stream, enabled, record_sub FROM recorder_cameras "
+                                           "ORDER BY id"), cur.fetchall())[1])
+    assert rows == (("front-door", "front-door-sub", 1, 1), ("garage", None, 0, 0))
+    db.upsert_status([{"camera_id": "front-door", "quality": "main", "state": "recording", "last_segment_ts": T,
+                       "restarts_24h": 2, "last_error": "x"}])
+    db.upsert_status([{"camera_id": "front-door", "quality": "main", "state": "backoff", "last_segment_ts": None,
+                       "restarts_24h": 3, "last_error": "boom"}])
+    st = db.run(lambda cur: (cur.execute("SELECT state, last_segment_ts, restarts_24h, last_error "
+                                         "FROM recorder_status"), cur.fetchall())[1])
+    assert len(st) == 1 and st[0][0] == "backoff" and st[0][2] == 3 and st[0][3] == "boom"
+    assert st[0][1] is not None  # NULL keeps the previous last_segment_ts
+
+
+def test_paths_with_prefix_escapes_like(db):
+    db.insert_segment(row(cam="a_b"))
+    db.insert_segment(row(cam="axb"))
+    assert db.paths_with_prefix("a_b/main/") == {rel_path_for("a_b", "main", T)}
+
+
+def test_build_row_prefers_segment_list_times():
+    job = SegmentJob("c", "main", "/x", "c/main/x.mp4", name_ts=T, start_ts=T + 0.4, end_ts=T + 60.4)
+    r = build_row(job, 60.0, 10, "h264", 640, 360, 15.0)
+    assert (r["start_ts"], r["end_ts"], r["duration_ms"]) == (T + 0.4, T + 60.4, 60000)
+    job = SegmentJob("c", "main", "/x", "c/main/x.mp4", name_ts=T)  # reconcile: name + probed duration
+    r = build_row(job, 59.9, 10, "h264", 640, 360, 15.0)
+    assert (r["start_ts"], r["end_ts"], r["duration_ms"]) == (T, T + 59.9, 59900)
+    job = SegmentJob("c", "main", "/x", "c/main/x.mp4", name_ts=T, start_ts=T, end_ts=T + 60)
+    assert build_row(job, 12.0, 10, None, None, None, None)["end_ts"] == T + 12  # list wrong -> file wins
+
+
+@needs_ffmpeg
+def test_reconcile_inserts_unknown_files_and_marks_missing(db, tmp_path):
+    root = tmp_path / "nvr"
+    clip = make_clip(tmp_path / "src.mp4", 3)
+    on_disk = []
+    for i in range(3):
+        rel = rel_path_for("front-door", "main", T + 60 * i)
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(clip, root / rel)
+        on_disk.append(rel)
+    # a known row whose file exists, and one whose file was deleted
+    db.insert_segment(row(start=T, dur=3.0))
+    db.insert_segment(row(start=T - 3600, dur=60.0))
+    # junk the reconcile must ignore
+    (root / "front-door/main/2026/11/04/21/notes.txt").write_text("x")
+    (root / ".trash").mkdir()
+
+    idx = Indexer(db)
+    idx.start()
+    res = reconcile(str(root), db, idx)
+    assert idx.wait_idle(30)
+    idx.stop()
+    assert res["queued"] == 2 and res["marked_missing"] == 1
+    segs = {s["path"]: s for s in db.list_segments("front-door", "main")}
+    assert set(on_disk) <= set(segs)
+    for rel in on_disk[1:]:
+        s = segs[rel]
+        assert s["codec"] == "h264" and s["width"] == 160 and s["height"] == 120 and s["fps"] == 10.0
+        assert 2.9 <= s["duration_ms"] / 1000 <= 3.1 and s["size_bytes"] == os.path.getsize(root / rel)
+    assert segs[rel_path_for("front-door", "main", T - 3600)]["missing"] is True
+
+    # every file on disk has a row; second run is a no-op; a restored file is un-marked
+    res2 = reconcile(str(root), db, Indexer(db))
+    assert res2["queued"] == 0 and res2["marked_missing"] == 0
+    gone = root / rel_path_for("front-door", "main", T - 3600)
+    gone.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(clip, gone)
+    assert reconcile(str(root), db, Indexer(db))["unmarked"] == 1
+
+
+@needs_ffmpeg
+def test_reconcile_skips_files_newer_than_cutoff_and_renames_corrupt(db, tmp_path):
+    root = tmp_path / "nvr"
+    live = root / rel_path_for("cam", "sub", T)
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"\0" * 100)  # being written by a live recorder
+    broken = root / rel_path_for("cam", "sub", T + 60)
+    broken.write_bytes(b"\0" * 100)
+    os.utime(broken, (T, T))
+    idx = Indexer(db)
+    res = reconcile(str(root), db, idx, cutoff=T + 1)
+    assert res["queued"] == 1  # only the old (broken) file
+    idx.start()
+    assert idx.wait_idle(30)
+    idx.stop()
+    assert idx.probe_errors == 1
+    assert not broken.exists() and broken.with_name(broken.name + ".bad").exists()
+    assert live.exists()
+    assert db.list_segments("cam", "sub") == []

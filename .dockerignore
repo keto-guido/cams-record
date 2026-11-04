@@ -1,0 +1,13 @@
+.git
+.github
+data
+secrets
+tests
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+config/*.yaml
+!config/*.example.yaml
+*.mp4
+*.mkv

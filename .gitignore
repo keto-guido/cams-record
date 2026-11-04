@@ -1,0 +1,22 @@
+# Runtime config (examples are committed)
+config/*.yaml
+!config/*.example.yaml
+
+# Runtime data / secrets
+data/
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local recordings / samples
+*.mp4
+*.mkv

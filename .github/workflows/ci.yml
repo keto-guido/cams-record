@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "ruff>=0.6"
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: rootpw
+          MARIADB_DATABASE: cams_record_test
+          MARIADB_USER: cams_record
+          MARIADB_PASSWORD: cams_record
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      CAMS_TEST_DB_HOST: 127.0.0.1
+      CAMS_TEST_DB_PORT: "3306"
+      CAMS_TEST_DB_USER: cams_record
+      CAMS_TEST_DB_PASSWORD: cams_record
+      CAMS_TEST_DB_NAME: cams_record_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install Python deps
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests (MariaDB-backed)
+        run: python -m pytest -q -rs -m "not integration" | tee /tmp/unit.txt
+      - name: Fail if MariaDB tests were skipped
+        run: "! grep -q 'SKIPPED' /tmp/unit.txt"
+      - name: Integration test (3 x 60 s segments from a looped testsrc file)
+        run: python -m pytest -q -rs -m integration | tee /tmp/integration.txt
+      - name: Fail if the integration test was skipped
+        run: "! grep -q 'SKIPPED' /tmp/integration.txt"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image with the legacy builder
+        env:
+          DOCKER_BUILDKIT: "0"
+        run: docker build -t cams-record:ci .
+      - name: Smoke test image (ffmpeg present, config parses, healthz answers)
+        run: |
+          docker run --rm --entrypoint ffmpeg cams-record:ci -hide_banner -version | head -1
+          mkdir -p /tmp/cr/config
+          cp config/cameras.example.yaml /tmp/cr/config/cameras.yaml
+          docker run -d --name cr --network host -v /tmp/cr/config:/config:ro \
+            -e RECORD_ROOT=/tmp/nvr -e HTTP_PORT=18099 cams-record:ci --config-dir /config --no-db
+          for i in $(seq 1 20); do
+            docker exec -e HTTP_PORT=18099 cr python /app/scripts/healthcheck.py && ok=1 && break
+            sleep 1
+          done
+          docker logs cr
+          test "$ok" = 1
+          docker logs cr | grep -q "front-door/main"
+          docker stop cr
