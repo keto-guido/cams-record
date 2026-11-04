@@ -1,16 +1,16 @@
 # cams-record cameras. Copy to config/cameras.yaml.
 # ids must match cams_detect.cameras.camera_id; streams are go2rtc stream names
-# (recorded from rtsp://127.0.0.1:8554/<stream>).
+# (recorded from rtsp://127.0.0.1:8554/<stream>). Naming: main_stream <id>-main, sub_stream <id>.
 cameras:
   front-door:
-    main_stream: front-door
-    sub_stream: front-door-sub
+    main_stream: front-door-main
+    sub_stream: front-door
     enabled: true
     record_main: true
     record_sub: true
   # driveway:
-  #   main_stream: driveway
-  #   sub_stream: driveway-sub
+  #   main_stream: driveway-main
+  #   sub_stream: driveway
   #   enabled: false
   #   record_main: true
   #   record_sub: true

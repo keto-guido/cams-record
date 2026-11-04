@@ -8,6 +8,9 @@ directories, so the supervisor creates the current and next hour directories ahe
 Restart policy: exponential backoff (1 s .. 60 s, reset after a healthy segment) and a stall
 watchdog (no segment closed in ``stall_factor * segment_time`` -> restart). Each restart is
 logged and counted (``restarts_total``, ``restarts_24h``).
+
+Disk guard: while the guard blocks this quality the recorder finalizes its open segment and waits
+in state ``disk_full``. That is not a failure, so it counts no restart and adds no backoff.
 """
 
 from __future__ import annotations
@@ -21,8 +24,9 @@ import time
 from collections import deque
 from pathlib import Path
 
+from .diskguard import DiskGuard
 from .indexer import PRIO_LIVE, Indexer, SegmentJob
-from .probe import probe_source_audio
+from .probe import probe_source
 from .segments import (
     ClockMapper,
     ffmpeg_pattern,
@@ -40,7 +44,8 @@ TICK = 1.0
 
 
 def build_ffmpeg_cmd(url: str, pattern: str, list_path: str, segment_time: int, audio: bool,
-                     rtsp_transport: str = "tcp", ffmpeg: str = "ffmpeg") -> list[str]:
+                     rtsp_transport: str = "tcp", ffmpeg: str = "ffmpeg",
+                     video_codec: str | None = None) -> list[str]:
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error"]
     if url.startswith("rtsp"):
         cmd += ["-rtsp_transport", rtsp_transport, "-timeout", "10000000"]
@@ -49,7 +54,10 @@ def build_ffmpeg_cmd(url: str, pattern: str, list_path: str, segment_time: int, 
     cmd += ["-i", url, "-map", "0:v"]
     if audio:
         cmd += ["-map", "0:a?"]
-    cmd += ["-c", "copy", "-f", "segment", "-segment_time", str(int(segment_time)),
+    cmd += ["-c", "copy"]
+    if video_codec == "hevc":
+        cmd += ["-tag:v", "hvc1"]  # Safari only plays HEVC in MP4 with the hvc1 tag (ffmpeg writes hev1)
+    cmd += ["-f", "segment", "-segment_time", str(int(segment_time)),
             "-segment_atclocktime", "1", "-reset_timestamps", "1", "-strftime", "1",
             "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart",
             "-segment_list", list_path, "-segment_list_type", "csv", pattern]
@@ -57,7 +65,8 @@ def build_ffmpeg_cmd(url: str, pattern: str, list_path: str, segment_time: int, 
 
 
 class StreamRecorder:
-    def __init__(self, camera_id: str, quality: str, url: str, rec_cfg: dict, indexer: Indexer):
+    def __init__(self, camera_id: str, quality: str, url: str, rec_cfg: dict, indexer: Indexer,
+                 guard: DiskGuard | None = None):
         self.camera_id = camera_id
         self.quality = quality
         self.url = url
@@ -65,6 +74,7 @@ class StreamRecorder:
         self.root = str(rec_cfg["root"]).rstrip("/")
         self.segment_time = int(rec_cfg["segment_time"])
         self.indexer = indexer
+        self.guard = guard
         state_dir = Path(rec_cfg["state_dir"])
         state_dir.mkdir(parents=True, exist_ok=True)
         self.list_path = str(state_dir / f"{camera_id}-{quality}.csv")
@@ -76,6 +86,7 @@ class StreamRecorder:
         self.state = "starting"
         self.last_error = ""
         self.audio: bool | None = None  # last probe result (None = not probed yet)
+        self.video_codec: str | None = None  # last probed source video codec
         self.last_segment_end: float | None = None  # UTC epoch of the newest closed segment's end
         self.last_segment_wall: float | None = None  # wall time it closed
         self.segments_total = 0
@@ -135,16 +146,21 @@ class StreamRecorder:
             self._recent.popleft()
         return round(sum(b for _, b in list(self._recent)) / 1e6, 1)
 
-    def _decide_audio(self) -> bool:
+    def _probe_source(self) -> bool:
+        """Refresh the source's video codec and decide on audio (a failed probe keeps the last result)."""
+        ok, video, audio_codec = probe_source(self.url, self.cfg.get("ffprobe", "ffprobe"),
+                                              self.cfg.get("rtsp_transport", "tcp"),
+                                              float(self.cfg.get("probe_timeout", 15)))
+        if ok:
+            if video != self.video_codec:
+                log.info("%s: source video %s", self.key, video or "none")
+            self.video_codec = video
         if self.cfg.get("audio", "auto") == "off":
             return False
-        ok, codec = probe_source_audio(self.url, self.cfg.get("ffprobe", "ffprobe"),
-                                       self.cfg.get("rtsp_transport", "tcp"),
-                                       float(self.cfg.get("probe_timeout", 15)))
         if ok:
-            audio = codec == "aac"
+            audio = audio_codec == "aac"
             if audio != self.audio:
-                log.info("%s: source audio %s -> %s", self.key, codec or "none",
+                log.info("%s: source audio %s -> %s", self.key, audio_codec or "none",
                          "copy" if audio else "dropped (only AAC is recorded)")
             self.audio = audio
         return bool(self.audio)
@@ -238,16 +254,46 @@ class StreamRecorder:
     # -- supervisor loop ---------------------------------------------------
     def _run(self) -> None:
         while not self._stop.is_set():
+            if self.guard is not None:
+                self.guard.check()  # fresh reading: never spawn ffmpeg on a level up to 30 s old
+            if self._disk_blocked():
+                self._hold_disk_full()
+                continue
             reason = self._run_once()
             if self._stop.is_set():
                 break
+            if self._disk_blocked():
+                continue
             self.restarts.add()
             delay = self.backoff.next()
             log.warning("%s: ffmpeg %s; restart #%d (%d in 24h) in %.0fs", self.key, reason,
                         self.restarts.total, self.restarts.last_24h(), delay)
             self._set_state("backoff", reason)
-            self._stop.wait(delay)
+            self._wait_backoff(delay)
         self._set_state("stopped")
+
+    def _disk_blocked(self) -> bool:
+        return self.guard is not None and self.guard.blocked(self.quality)
+
+    def _wait_backoff(self, delay: float) -> None:
+        """Sleep through a backoff, ending early on stop or when the guard blocks this quality."""
+        end = time.monotonic() + delay
+        while not self._disk_blocked():
+            left = end - time.monotonic()
+            if left <= 0 or self._stop.wait(min(TICK, left)):
+                return
+
+    def _hold_disk_full(self) -> None:
+        """Stay in state disk_full until the guard lets this quality record again (or stop)."""
+        msg = f"low disk space, recording stopped ({self.guard.state})"
+        log.error("%s: disk_full: %s", self.key, msg)
+        self._set_state("disk_full", msg)
+        while self._disk_blocked():
+            if self._stop.wait(TICK):
+                return
+        log.warning("%s: disk space recovered, recording resumes", self.key)
+        self.backoff.reset()
+        self._set_state("starting", "")
 
     def _run_once(self) -> str:
         self._set_state("starting")
@@ -255,11 +301,12 @@ class StreamRecorder:
             self.ensure_dirs()
         except OSError as exc:
             return f"cannot create directories: {exc}"
-        audio = self._decide_audio()
-        if self._stop.is_set():
+        audio = self._probe_source()
+        if self._stop.is_set() or self._disk_blocked():
             return "stopped"
         cmd = build_ffmpeg_cmd(self.url, self.pattern, self.list_path, self.segment_time, audio,
-                               self.cfg.get("rtsp_transport", "tcp"), self.cfg.get("ffmpeg", "ffmpeg"))
+                               self.cfg.get("rtsp_transport", "tcp"), self.cfg.get("ffmpeg", "ffmpeg"),
+                               self.video_codec)
         try:
             os.unlink(self.list_path)
         except FileNotFoundError:
@@ -283,6 +330,9 @@ class StreamRecorder:
         try:
             while True:
                 if self._stop.wait(TICK):
+                    break
+                if self._disk_blocked():
+                    reason = "disk_full"
                     break
                 try:
                     self.ensure_dirs()
@@ -323,7 +373,7 @@ class StreamRecorder:
         now = time.time()
         return {
             "camera_id": self.camera_id, "quality": self.quality, "state": self.state, "url": self.url,
-            "audio": self.audio, "last_segment_ts": self.last_segment_end,
+            "video_codec": self.video_codec, "audio": self.audio, "last_segment_ts": self.last_segment_end,
             "last_segment_age_s": round(now - self.last_segment_wall, 1) if self.last_segment_wall else None,
             "segments_total": self.segments_total, "mb_per_hour": self.mb_per_hour(now),
             "restarts_total": self.restarts.total, "restarts_24h": self.restarts.last_24h(),

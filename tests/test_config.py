@@ -16,7 +16,8 @@ def test_defaults_and_cameras(tmp_path):
     cfg, cams = load_config(tmp_path, env={})
     assert cfg["recording"]["root"] == "/volume1/nvr"
     assert cfg["recording"]["segment_time"] == 60
-    assert cfg["http"] == {"host": "127.0.0.1", "port": 8099}
+    assert cfg["http"] == {"host": "127.0.0.1", "port": 8097}
+    assert cfg["recording"]["min_free_gb"] == 200 and cfg["recording"]["resume_free_gb"] == 250
     assert cfg["db"]["database"] == "cams_record"
     assert cfg["db"]["password_file"] == "/run/secrets/db_password"
     assert cfg["base_path"] == "/cams-record"
@@ -58,7 +59,8 @@ def test_env_overrides_and_validation(tmp_path):
 
 
 @pytest.mark.parametrize("cfg", [{"auth": {"mode": "basic"}}, {"recording": {"segment_time": 1}},
-                                 {"recording": {"audio": "always"}}, {"recording": {"backoff_initial": 0}}])
+                                 {"recording": {"audio": "always"}}, {"recording": {"backoff_initial": 0}},
+                                 {"recording": {"min_free_gb": -1}}, {"recording": {"min_free_gb": 300}}])
 def test_invalid_global(tmp_path, cfg):
     write(tmp_path, {}, cfg)
     with pytest.raises(ValueError):
@@ -78,7 +80,8 @@ def test_example_files_parse(tmp_path):
     (tmp_path / "cameras.yaml").write_text((src / "cameras.example.yaml").read_text())
     (tmp_path / "config.yaml").write_text((src / "config.example.yaml").read_text())
     cfg, cams = load_config(tmp_path, env={})
-    assert "front-door" in cams
+    assert cams["front-door"].streams() == [("main", "front-door-main"), ("sub", "front-door")]
+    assert cfg["http"]["port"] == 8097
     assert cfg["go2rtc"]["rtsp_url"] == "rtsp://127.0.0.1:8554/{stream}"
 
 

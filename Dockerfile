@@ -22,7 +22,7 @@ COPY config/config.example.yaml config/cameras.example.yaml /app/config/
 
 RUN mkdir -p /config /volume1/nvr /tmp/cams-record
 
-EXPOSE 8099
+EXPOSE 8097
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD ["python", "/app/scripts/healthcheck.py"]
 

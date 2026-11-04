@@ -1,7 +1,7 @@
 # cams-record global settings (optional; every key has a default). Copy to config/config.yaml.
 log_level: INFO
 base_path: /cams-record
-http: {host: 127.0.0.1, port: 8099}
+http: {host: 127.0.0.1, port: 8097}
 go2rtc:
   rtsp_url: rtsp://127.0.0.1:8554/{stream}
 recording:
@@ -11,6 +11,8 @@ recording:
   backoff_initial: 1     # restart backoff 1 s .. 60 s
   backoff_max: 60
   audio: auto            # auto = copy audio only when the source track is AAC; off = video only
+  min_free_gb: 200       # below: stop main, keep sub; below half of this: stop sub too; 0 disables
+  resume_free_gb: 250    # resume once free space is back above this
 auth:
   mode: jwt              # jwt | none (none only for local testing)
   secret_file: /run/secrets/apphub_jwt

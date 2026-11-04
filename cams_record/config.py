@@ -7,8 +7,8 @@ cameras.yaml::
 
     cameras:
       front-door:                 # id = cams_detect.cameras.camera_id
-        main_stream: front-door   # go2rtc stream names
-        sub_stream: front-door-sub
+        main_stream: front-door-main   # go2rtc stream names
+        sub_stream: front-door
         enabled: true
         record_main: true
         record_sub: true
@@ -34,7 +34,7 @@ QUALITIES = ("main", "sub")
 DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "base_path": "/cams-record",
-    "http": {"host": "127.0.0.1", "port": 8099},
+    "http": {"host": "127.0.0.1", "port": 8097},
     "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}"},
     "recording": {
         "root": "/volume1/nvr",
@@ -50,6 +50,8 @@ DEFAULTS: dict[str, Any] = {
         "ffmpeg": "ffmpeg",
         "ffprobe": "ffprobe",
         "ffprobe_nice": 10,
+        "min_free_gb": 200,  # below: stop main; below half of it: stop sub as well; 0 disables
+        "resume_free_gb": 250,  # resume once free space is back above this
     },
     "auth": {
         "mode": "jwt",  # jwt | none
@@ -227,6 +229,8 @@ def validate(cfg: dict) -> dict:
         raise ValueError("recording.audio must be 'auto' or 'off'")
     if float(rec["backoff_initial"]) <= 0 or float(rec["backoff_max"]) < float(rec["backoff_initial"]):
         raise ValueError("recording.backoff_initial must be > 0 and <= backoff_max")
+    if float(rec["min_free_gb"]) < 0 or float(rec["resume_free_gb"]) < float(rec["min_free_gb"]):
+        raise ValueError("recording.min_free_gb must be >= 0 and <= resume_free_gb")
     return cfg
 
 

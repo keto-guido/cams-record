@@ -23,7 +23,7 @@ def test_three_segments_indexed_without_gaps(db, tmp_path):
     clip = make_clip(tmp_path / "src" / "testsrc.mp4", 3 * SEG)  # looped with -stream_loop -1
     root = tmp_path / "nvr"
     cfg = deep_merge(DEFAULTS, {"recording": {"root": str(root), "state_dir": str(tmp_path / "state"),
-                                              "segment_time": SEG}})
+                                              "segment_time": SEG, "min_free_gb": 0, "resume_free_gb": 0}})
     cams = {"front-door": resolve_camera("front-door", {"main_stream": str(clip), "sub_stream": str(clip)})}
     svc = Service(cfg, cams, db)
 

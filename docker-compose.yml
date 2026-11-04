@@ -7,11 +7,11 @@ services:
     image: cams-record:latest
     container_name: cams-record
     restart: unless-stopped
-    network_mode: host            # reach go2rtc at 127.0.0.1:8554, MariaDB at 127.0.0.1:3306; bind 127.0.0.1:8099
+    network_mode: host            # reach go2rtc at 127.0.0.1:8554, MariaDB at 127.0.0.1:3306; bind 127.0.0.1:8097
     environment:
       TZ: America/Chicago         # logs only; file names and DB times are UTC
       HTTP_HOST: 127.0.0.1
-      HTTP_PORT: "8099"
+      HTTP_PORT: "8097"
       BASE_PATH: /cams-record
       RECORD_ROOT: /volume1/nvr
       # DB_HOST: 127.0.0.1
@@ -24,7 +24,7 @@ services:
       - apphub_jwt
     # Synology's kernel lacks CFS quota support, so `cpus:` fails there; use a relative CPU weight.
     cpu_shares: 256
-    mem_limit: 256m
+    mem_limit: 512m
     stop_grace_period: 30s        # lets every ffmpeg finalize its open segment
     healthcheck:
       test: ["CMD", "python", "/app/scripts/healthcheck.py"]

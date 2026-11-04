@@ -1,4 +1,4 @@
-"""ffprobe helpers (segment metadata, source audio codec)."""
+"""ffprobe helpers (segment metadata, source video and audio codecs)."""
 
 from __future__ import annotations
 
@@ -96,9 +96,9 @@ def probe_segment(path: str, ffprobe: str = "ffprobe", nice: int = 10, timeout: 
     return parse_probe(data, size)
 
 
-def probe_source_audio(url: str, ffprobe: str = "ffprobe", rtsp_transport: str = "tcp",
-                       timeout: float = 15) -> tuple[bool, str | None]:
-    """(reachable, audio codec name or None) for the recorder's input."""
+def probe_source(url: str, ffprobe: str = "ffprobe", rtsp_transport: str = "tcp",
+                 timeout: float = 15) -> tuple[bool, str | None, str | None]:
+    """(reachable, video codec name or None, audio codec name or None) for the recorder's input."""
     cmd = [ffprobe, "-v", "error"]
     if url.startswith("rtsp"):
         cmd += ["-rtsp_transport", rtsp_transport, "-timeout", str(int(timeout * 1_000_000))]
@@ -106,12 +106,13 @@ def probe_source_audio(url: str, ffprobe: str = "ffprobe", rtsp_transport: str =
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout + 5, check=False)
     except (OSError, subprocess.TimeoutExpired):
-        return False, None
+        return False, None, None
     if p.returncode != 0:
-        return False, None
+        return False, None, None
     try:
         streams = json.loads(p.stdout or b"{}").get("streams") or []
     except ValueError:
-        return False, None
+        return False, None, None
+    video = next((s.get("codec_name") for s in streams if s.get("codec_type") == "video"), None)
     audio = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), None)
-    return True, audio
+    return True, video, audio

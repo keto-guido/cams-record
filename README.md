@@ -14,15 +14,19 @@ There is no UI, retention or playback yet.
   ffmpeg when no segment closes within 3 × segment_time. Every restart is logged and counted
   (`restarts_24h` in `recorder_status` and `/api/status`, `cams_record_restarts_total` in
   `/api/metrics`).
+- Disk guard: main stops below `recording.min_free_gb` and sub below half of it, until free space
+  is back above `recording.resume_free_gb` (see [Disk guard](#disk-guard)).
+- HEVC sources get `-tag:v hvc1`, so Safari can play the MP4s.
 - Startup reconcile: files on disk without a row are inserted, and rows whose file is gone get
   `missing=1`.
-- HTTP on `127.0.0.1:8099` only: `GET /healthz` (no auth) and `GET /api/status` (App Hub JWT
+- HTTP on `127.0.0.1:8097` only: `GET /healthz` (no auth) and `GET /api/status` (App Hub JWT
   in `x-apphub-token`, admin role required).
 
 ## Contents
 
 - [Layout and timestamps](#layout-and-timestamps)
 - [Configuration](#configuration)
+- [Disk guard](#disk-guard)
 - [Database](#database)
 - [Deploy (Jefferson)](#deploy-jefferson)
 - [Rollout and acceptance](#rollout-and-acceptance)
@@ -59,8 +63,8 @@ There is no UI, retention or playback yet.
 ```yaml
 cameras:
   front-door:                 # same id as cams_detect.cameras.camera_id
-    main_stream: front-door   # go2rtc stream names
-    sub_stream: front-door-sub
+    main_stream: front-door-main   # go2rtc stream names: <id>-main and <id>
+    sub_stream: front-door
     enabled: true
     record_main: true
     record_sub: true
@@ -75,14 +79,37 @@ cameras:
 | `recording.stall_factor` | `3` | watchdog limit = factor × segment_time |
 | `recording.backoff_initial` / `backoff_max` | `1` / `60` | seconds |
 | `recording.audio` | `auto` | `auto` = copy AAC audio, drop any other codec; `off` |
+| `recording.min_free_gb` | `200` | decimal GB; see [Disk guard](#disk-guard); `0` disables the guard |
+| `recording.resume_free_gb` | `250` | must be >= `min_free_gb` |
 | `go2rtc.rtsp_url` | `rtsp://127.0.0.1:8554/{stream}` | |
 | `db.host` / `port` / `database` / `user` | `127.0.0.1` / `3306` / `cams_record` / `cams_record` | env `DB_HOST`, `DB_PORT`, … |
 | `db.password_file` | `/run/secrets/db_password` | |
 | `auth.secret_file` | `/run/secrets/apphub_jwt` | the App Hub's shared HS256 secret |
-| `http.host` / `port` | `127.0.0.1` / `8099` | |
+| `http.host` / `port` | `127.0.0.1` / `8097` | |
 | `base_path` | `/cams-record` | requests with or without the prefix both work |
 
 The config is read once at startup. After editing it, run `docker compose restart cams-record`.
+
+## Disk guard
+
+The free space on `recording.root` is checked every 30 s, and again before each ffmpeg start.
+
+| free space | main | sub |
+|---|---|---|
+| below `min_free_gb` (200) | stopped (`disk_full`) | keeps recording |
+| below half of `min_free_gb` (100) | stopped | stopped (`disk_full`) |
+| between the thresholds on the way back up | stays as it was | stays as it was |
+| above `resume_free_gb` (250) | resumes | resumes |
+
+- A stopped recorder finalizes its open segment first and logs at ERROR. It shows
+  `state: disk_full` in `/api/status`, with `disk.guard` set to `ok`, `main_stopped` or
+  `all_stopped`. `/api/metrics` has `cams_record_disk_full` per stream and
+  `cams_record_disk_guard_level` (0, 1 or 2). Disk stops do not count as restarts.
+- **No recorder starts below the minimum.** If the service starts below `min_free_gb`, main and
+  sub both stay in `disk_full` until free space is above `resume_free_gb`. A sub that is already
+  recording can still restart its ffmpeg (after a go2rtc hiccup, say) until the 100 GB limit.
+- Nothing deletes recordings yet, so recording only resumes after you free space yourself.
+- If the free space cannot be read, the guard logs a warning and keeps its current state.
 
 ## Database
 
@@ -151,7 +178,8 @@ end_ts)`, `INDEX(end_ts)` and `INDEX(path)`. The path index makes reconcile look
    ```
 
    Check that the stream names exist in go2rtc (`http://<nas>:1984/`) and that
-   `rtsp://127.0.0.1:8554/front-door` plays.
+   `rtsp://127.0.0.1:8554/front-door-main` plays. Streams are named `<id>-main` (main) and
+   `<id>` (sub).
 
 5. **Build and start** (Docker 24 / compose 2.20 on DSM, legacy builder):
 
@@ -168,15 +196,15 @@ end_ts)`, `INDEX(end_ts)` and `INDEX(path)`. The path index makes reconcile look
    ```
 
    You should see `mariadb: applied schema migration v1`,
-   `front-door/main: recording rtsp://127.0.0.1:8554/front-door …` and, after about a minute,
+   `front-door/main: recording rtsp://127.0.0.1:8554/front-door-main …` and, after about a minute,
    rows in `segments`.
 
-6. **App Hub** (optional in Phase 1): proxy `/cams-record` to `http://127.0.0.1:8099`, with the
+6. **App Hub** (optional in Phase 1): proxy `/cams-record` to `http://127.0.0.1:8097`, with the
    App Hub injecting its JWT in `x-apphub-token`. Then `GET /cams-record/api/status` works for
    admins.
 
 Compose limits: `cpu_shares: 256` (DSM has no CFS quota, so `cpus:` is not used),
-`mem_limit: 256m`, `restart: unless-stopped`, and `stop_grace_period: 30s` so that every
+`mem_limit: 512m`, `restart: unless-stopped`, and `stop_grace_period: 30s` so that every
 ffmpeg can finalize its open segment on `docker compose down`.
 
 ### Update
@@ -266,20 +294,20 @@ Optionally remove the users: `DROP USER 'cams_record'@'%'; DROP USER 'cams_reade
 
 ## HTTP API
 
-These routes are served on `127.0.0.1:8099`, under `/cams-record` (the prefix is optional).
+These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is optional).
 
 | route | auth | |
 |---|---|---|
 | `GET /healthz` | none | `{"ok": true}`; used by the Docker healthcheck |
-| `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`stopped`), `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root, indexer queue, DB state, last reconcile |
-| `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, index backlog |
+| `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile |
+| `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog |
 
 Auth trusts only the `x-apphub-token` header. The value must be an HS256 JWT signed with the
 App Hub secret (`/run/secrets/apphub_jwt`), with `exp` set and a `roles` claim that contains
 `admin`. The verification is the same as in cams-detect.
 
 ```bash
-curl -s -H "x-apphub-token: $TOKEN" http://127.0.0.1:8099/cams-record/api/status | jq
+curl -s -H "x-apphub-token: $TOKEN" http://127.0.0.1:8097/cams-record/api/status | jq
 ```
 
 ## Development

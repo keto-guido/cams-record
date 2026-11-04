@@ -2,6 +2,9 @@ import calendar
 import os
 import time
 
+import pytest
+
+from cams_record import recorder
 from cams_record.config import DEFAULTS, deep_merge
 from cams_record.indexer import Indexer
 from cams_record.recorder import StreamRecorder, build_ffmpeg_cmd
@@ -27,6 +30,25 @@ def test_ffmpeg_cmd_rtsp_stream_copy():
     assert "-segment_list /s/l.csv -segment_list_type csv" in s
     assert cmd[-1] == "/r/%Y.mp4"
     assert "-re" not in cmd and "-vcodec" not in cmd and "libx264" not in s
+    assert "-tag:v" not in cmd
+
+
+def test_ffmpeg_cmd_tags_only_hevc_for_safari():
+    cmd = build_ffmpeg_cmd("rtsp://x/y", "/r/x.mp4", "/s/l.csv", 60, audio=False, video_codec="hevc")
+    assert " -c copy -tag:v hvc1 -f segment " in " ".join(cmd)
+    h264 = build_ffmpeg_cmd("rtsp://x/y", "/r/x.mp4", "/s/l.csv", 60, audio=False, video_codec="h264")
+    assert "-tag:v" not in h264
+
+
+@pytest.mark.parametrize("audio", ["auto", "off"])
+def test_hevc_source_is_tagged_with_any_audio_setting(tmp_path, monkeypatch, audio):
+    monkeypatch.setattr(recorder, "probe_source", lambda *a: (True, "hevc", "aac"))
+    r = StreamRecorder("cam", "main", "/x.mp4", rec_cfg(tmp_path, audio=audio), Indexer(None))
+    assert r._probe_source() is (audio == "auto")
+    assert r.video_codec == "hevc"
+    monkeypatch.setattr(recorder, "probe_source", lambda *a: (False, None, None))
+    r._probe_source()  # a failed probe keeps the last known codec
+    assert r.video_codec == "hevc"
 
 
 def test_ffmpeg_cmd_no_audio_and_file_input():

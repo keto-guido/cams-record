@@ -5,7 +5,7 @@ import os
 import sys
 import urllib.request
 
-port = os.environ.get("HTTP_PORT", "8099")
+port = os.environ.get("HTTP_PORT", "8097")
 base = (os.environ.get("BASE_PATH", "/cams-record") or "").strip().rstrip("/")
 if base and not base.startswith("/"):
     base = "/" + base

@@ -10,6 +10,7 @@ import time
 from . import __version__
 from .config import CameraConfig, stream_url
 from .db import Database, DBUnavailable
+from .diskguard import CHECK_INTERVAL, DiskGuard
 from .indexer import Indexer
 from .reconcile import reconcile
 from .recorder import StreamRecorder
@@ -25,28 +26,37 @@ class Service:
         self.root = str(self.rec_cfg["root"]).rstrip("/")
         self.db = db
         self.indexer = Indexer(db, self.rec_cfg.get("ffprobe", "ffprobe"), int(self.rec_cfg.get("ffprobe_nice", 10)))
+        self.guard = DiskGuard(self.root, self.rec_cfg["min_free_gb"], self.rec_cfg["resume_free_gb"])
         self.recorders: dict[str, StreamRecorder] = {}
         for cam in cameras.values():
             for quality, stream in cam.streams():
                 url = stream_url(cfg["go2rtc"]["rtsp_url"], stream)
-                rec = StreamRecorder(cam.id, quality, url, self.rec_cfg, self.indexer)
+                rec = StreamRecorder(cam.id, quality, url, self.rec_cfg, self.indexer, self.guard)
                 self.recorders[rec.key] = rec
         self.started_at = time.time()
         self.reconcile_result: dict | None = None
         self._stop = threading.Event()
         self._bg: threading.Thread | None = None
+        self._guard_thread: threading.Thread | None = None
 
     def start(self, run_reconcile: bool = True) -> None:
         self.started_at = time.time()
         self.indexer.start()
+        self.guard.check(startup=True)  # before any recorder starts: refuse them below the minimum
         for rec in self.recorders.values():
             rec.start()
+        self._guard_thread = threading.Thread(target=self._guard_loop, name="disk-guard", daemon=True)
+        self._guard_thread.start()
         log.info("cams-record %s: %d streams on %d cameras -> %s", __version__, len(self.recorders),
                  sum(1 for c in self.cameras.values() if c.streams()), self.root)
         if self.db is not None:
             self._bg = threading.Thread(target=self._startup_db, args=(run_reconcile,), name="startup-db",
                                         daemon=True)
             self._bg.start()
+
+    def _guard_loop(self) -> None:
+        while not self._stop.wait(CHECK_INTERVAL):
+            self.guard.check()
 
     def _startup_db(self, run_reconcile: bool) -> None:
         """Sync recorder_cameras and run the reconcile once the DB is reachable (retries with backoff)."""
@@ -67,6 +77,8 @@ class Service:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._guard_thread is not None:
+            self._guard_thread.join(timeout=5)
         for rec in self.recorders.values():
             rec.stop()
         for rec in self.recorders.values():
@@ -77,12 +89,14 @@ class Service:
 
     # -- status --------------------------------------------------------------
     def disk(self) -> dict:
+        guard = {"guard": self.guard.state, "min_free_gb": self.rec_cfg["min_free_gb"],
+                 "resume_free_gb": self.rec_cfg["resume_free_gb"]}
         try:
             u = shutil.disk_usage(self.root)
             return {"path": self.root, "total_gb": round(u.total / 1e9, 1), "free_gb": round(u.free / 1e9, 1),
-                    "free_pct": round(100 * u.free / u.total, 1) if u.total else None}
+                    "free_pct": round(100 * u.free / u.total, 1) if u.total else None, **guard}
         except OSError as exc:
-            return {"path": self.root, "error": str(exc)}
+            return {"path": self.root, "error": str(exc), **guard}
 
     def status(self) -> dict:
         streams = [r.status() for r in self.recorders.values()]
@@ -105,6 +119,8 @@ class Service:
             "# TYPE cams_record_segments_total counter",
             "# TYPE cams_record_last_segment_age_seconds gauge",
             "# TYPE cams_record_recording gauge",
+            "# TYPE cams_record_disk_full gauge",
+            "# TYPE cams_record_disk_guard_level gauge",
         ]
         for r in self.recorders.values():
             s = r.status()
@@ -114,6 +130,8 @@ class Service:
             if s["last_segment_age_s"] is not None:
                 lines.append(f"cams_record_last_segment_age_seconds{{{lbl}}} {s['last_segment_age_s']}")
             lines.append(f"cams_record_recording{{{lbl}}} {1 if s['state'] == 'recording' else 0}")
+            lines.append(f"cams_record_disk_full{{{lbl}}} {1 if s['state'] == 'disk_full' else 0}")
+        lines.append(f"cams_record_disk_guard_level {self.guard.level}")
         d = self.disk()
         if "free_gb" in d:
             lines.append(f"cams_record_disk_free_bytes {int(d['free_gb'] * 1e9)}")
