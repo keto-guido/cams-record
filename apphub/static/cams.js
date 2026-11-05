@@ -338,15 +338,15 @@
   function updatePill(){const live=mode==='live'&&!gesture;$('cam-mode').textContent=live?'LIVE':fmt(center);$('cam-mode').classList.toggle('live',live);$('cam-live').hidden=mode==='live';if(mode==='live')$('cam-unmute').hidden=true;icon('play',v.paused?'play':'pause');}
   function drawTimeline(){if(!raf)raf=requestAnimationFrame(paint);}
   function paint(){raf=0;if(!tlCam)return;const w=bar.clientWidth,dpr=devicePixelRatio||1;if(!w)return;bar.width=Math.round(w*dpr);bar.height=60*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);const x=t=>(t-left())/span()*w;
-    ctx.clearRect(0,0,w,60);ctx.fillStyle=getComputedStyle(bar).backgroundColor;ctx.beginPath();ctx.roundRect(0,0,w,44,10);ctx.fill();
-    ctx.fillStyle='rgba(255,255,255,.18)';(spans.sub||[]).forEach(([a,b])=>ctx.fillRect(x(a),10,x(b)-x(a),24));
-    ctx.fillStyle='rgba(255,255,255,.24)';(spans.main||[]).forEach(([a,b])=>ctx.fillRect(x(a),32,x(b)-x(a),2));
-    const accent=getComputedStyle(bar).getPropertyValue('--acc').trim()||'#a58aff';ctx.fillStyle=accent;events.forEach(e=>{ctx.beginPath();ctx.arc(x(e.start_ts),22,3,0,Math.PI*2);ctx.fill();});
+    const style=getComputedStyle(bar),token=n=>style.getPropertyValue(n).trim();ctx.clearRect(0,0,w,60);ctx.fillStyle=style.backgroundColor;ctx.beginPath();ctx.roundRect(0,0,w,44,10);ctx.fill();
+    ctx.fillStyle=token('--tl-sub');(spans.sub||[]).forEach(([a,b])=>ctx.fillRect(x(a),10,x(b)-x(a),24));
+    ctx.fillStyle=token('--tl-main');(spans.main||[]).forEach(([a,b])=>ctx.fillRect(x(a),32,x(b)-x(a),2));
+    ctx.fillStyle=token('--mn-accent');events.forEach(e=>{ctx.beginPath();ctx.arc(x(e.start_ts),22,3,0,Math.PI*2);ctx.fill();});
     if(selected){ctx.globalAlpha=.24;ctx.fillRect(x(rangeS),0,x(rangeE)-x(rangeS),44);ctx.globalAlpha=1;for(const t of [rangeS,rangeE]){ctx.fillRect(x(t)-3,2,6,40);}}
-    ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(x(Date.now()/1000),2,1,40);
-    ctx.fillStyle='#fff';ctx.fillRect(w/2-1,0,2,44);ctx.beginPath();ctx.moveTo(w/2-4,0);ctx.lineTo(w/2+4,0);ctx.lineTo(w/2,5);ctx.fill();
+    ctx.fillStyle=token('--tl-now');ctx.fillRect(x(Date.now()/1000),2,1,40);
+    ctx.fillStyle=token('--tl-head');ctx.fillRect(w/2-1,0,2,44);ctx.beginPath();ctx.moveTo(w/2-4,0);ctx.lineTo(w/2+4,0);ctx.lineTo(w/2,5);ctx.fill();
     const steps=[60,300,600,900,1800,3600,7200,10800,21600],step=steps.find(s=>s/span()*w>=56)||21600;
-    ctx.fillStyle='#9298a3';ctx.font='10px system-ui';ctx.textAlign='center';
+    ctx.fillStyle=token('--tl-text');ctx.font='10px system-ui';ctx.textAlign='center';
     for(let t=Math.ceil(left()/step)*step;t<left()+span();t+=step){const d=new Date(t*1000),label=d.toLocaleTimeString([],{hour:'numeric',...(d.getMinutes()?{minute:'2-digit'}:{}),hour12:true}).replace(':00','');if(x(t)>24&&x(t)<w-24)ctx.fillText(label,x(t),57);}
     updatePill();
   }
@@ -481,7 +481,7 @@
     if (route.view === 'det') { allList.reset(); evStart(allList); }
     if (route.view === 'cam') {
       const c = hubCams.find(x => x.id === route.id);
-      $('cam-name').textContent = c.name; document.title = c.name + ' · Cameras';
+      $('cam-name').textContent = c.name; document.title = c.name + ' · Cameras · MERSINO NETWORK';
       try { window.scrollTo(0, 0); } catch (e) {}
       if (prev.view !== 'cam' || prev.id !== route.id) { timelineStart(c.id); liveStart(c.id); }
       $('cam-list').innerHTML = '<p class="muted sm">Loading…</p>'; $('cam-more').hidden = true; $('cam-off').hidden = true;
@@ -491,7 +491,7 @@
         if (!camDet) { $('cam-off').hidden = false; $('cam-list').innerHTML = ''; return; }
         camList.reset(); evStart(camList);
       });
-    } else document.title = 'Cameras · App Hub';
+    } else document.title = 'Cameras · MERSINO NETWORK';
   }
   tiles.forEach(t => t.addEventListener('click', () => { sessionStorage.setItem('cams-in-app', '1'); location.hash = 'cam=' + t.dataset.id; }));
   document.querySelectorAll('.cams-tab').forEach(a => a.addEventListener('click', () => sessionStorage.setItem('cams-in-app', '1')));

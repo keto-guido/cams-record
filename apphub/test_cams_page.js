@@ -8,8 +8,8 @@ Module._resolveFilename = function(request, parent, ...rest) {
   return original.call(this, request, parent, ...rest);
 };
 require.cache[path.join(dir, 'lib.js')] = {id:path.join(dir,'lib.js'),filename:path.join(dir,'lib.js'),loaded:true,exports:{DIR:dir}};
-let html;
-const app = require('./cams')({esc:String, page:(title,body)=>'<head></head>'+body, send:(res,status,body,type,headers)=>res.done({status,body,type,headers}),notFound:()=>assert.fail('not found')});
+let html, pageOptions;
+const app = require('./cams')({esc:String, page:(title,body,options)=>{pageOptions=options;assert(title.includes('MERSINO NETWORK'));return '<head></head>'+body;}, send:(res,status,body,type,headers)=>res.done({status,body,type,headers}),notFound:()=>assert.fail('not found')});
 Module._resolveFilename = original;
 app.handle({method:'GET'}, {done:r=>{assert.equal(r.status,200);html=r.body;}}, {user:'test',csrf:'csrf'}, '/cams/', new URL('http://localhost/cams/'));
 assert(html.includes('id="timeline"'));
@@ -20,8 +20,13 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=14'));
-assert(html.includes('cams.css?v=10'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=15'));
+assert(html.includes('cams.css?v=11'));
+// Shared navigation: the hub's page() renders the bar from these; sections use the one sub-nav pattern.
+assert.deepEqual(pageOptions, {app:'cams',name:'Cameras'});
+assert(html.includes('<nav class="mn-subnav cams-tabs" id="cams-tabs"'));
+for (const view of ['grid','det']) assert(html.includes('class="cams-tab" data-view="'+view+'"'));
+assert(!/Back to Dashboard|backdash|action="\/logout"|App Hub/.test(html));
 assert(html.includes('id="tl-det-prev" aria-label="Previous detection"'));
 assert(html.includes('id="tl-det-next" aria-label="Next detection"'));
 assert(html.includes('>Prev event<') && html.includes('>Next event<'));
