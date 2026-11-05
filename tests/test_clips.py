@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -7,8 +9,10 @@ from fastapi.testclient import TestClient
 
 from cams_record.clips import Clips, concat_listing, ffmpeg_command, parse_time, select_segments
 from cams_record.config import DEFAULTS, deep_merge
+from cams_record.media import Media
 from cams_record.protection import DetectionProtection, event_window
 from cams_record.web import create_app
+from tests.conftest import make_clip, needs_ffmpeg
 from tests.test_web import SECRET, tok
 
 
@@ -330,3 +334,46 @@ def test_concat_trim_directives(rows, start, end, expected):
 def test_concat_path_escaping():
     listing = concat_listing(["C:\\footage\\front door's.mp4"], [seg()], 20, 32)
     assert listing == "file 'C:/footage/front door'\\''s.mp4'\ninpoint 20\noutpoint 32\n"
+
+
+def mp4_boxes(path):
+    """Top-level MP4 box types, in file order."""
+    boxes, offset, total = [], 0, path.stat().st_size
+    with path.open("rb") as f:
+        while offset < total:
+            f.seek(offset)
+            header = f.read(16)
+            size = int.from_bytes(header[:4], "big")
+            if size == 1:
+                size = int.from_bytes(header[8:16], "big")
+            elif size == 0:
+                size = total - offset
+            assert size >= 8
+            boxes.append(header[4:8].decode("latin-1"))
+            offset += size
+    return boxes
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("encoder,codec,tag", [("libx264", "h264", "avc1"), ("libx265", "hevc", "hvc1")])
+def test_clip_and_export_play_on_ios(setup, encoder, codec, tag):
+    """Photos and Safari need moov before mdat, hvc1-tagged HEVC, and AAC audio."""
+    cfg, db, _ = setup
+    if encoder not in subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout:
+        pytest.skip(f"ffmpeg has no {encoder}")
+    cfg["recording"]["ffmpeg"] = "ffmpeg"
+    root = Path(cfg["recording"]["root"])
+    make_clip(root / "src.mp4", 3)
+    # Default ffmpeg HEVC muxing tags hev1, so hvc1 in the output proves the clip command sets it.
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(root / "src.mp4"), "-c:v", encoder, "-c:a", "copy",
+                    str(root / "seg.mp4")], check=True, capture_output=True)
+    db.clip_segments.return_value = ([seg(100, 103) | {"path": "seg.mp4", "codec": codec}], 103)
+    clips = Clips(db, cfg)
+    for path in (clips.build("cam", "sub", 100, 103), Media(clips, cfg).export("cam", "sub", 100, 103, 0)):
+        boxes = mp4_boxes(path)
+        assert boxes.index("moov") < boxes.index("mdat")
+        result = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)],
+                                capture_output=True, check=True)
+        streams = {s["codec_type"]: s for s in json.loads(result.stdout)["streams"]}
+        assert (streams["video"]["codec_name"], streams["video"]["codec_tag_string"]) == (codec, tag)
+        assert streams["audio"]["codec_name"] == "aac"
