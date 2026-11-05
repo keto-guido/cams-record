@@ -319,3 +319,15 @@ def test_janitor_legacy_shared_file(db, tmp_path):
     assert janitor.run_once()["segments"] == 1
     assert not path.exists()
     assert db.list_segments("front-door", "main") == []
+
+
+def test_indexed_segment_rows(db):
+    db.insert_segment(row())
+    db.insert_segment(row(start=T + 60))
+    rows = db.segment_rows('front-door', 'main', T + 30, T + 120)
+    assert [r['start_ts'] for r in rows] == [T, T + 60]
+    assert rows[0]['size'] == 1234
+    assert db.segment_by_id(rows[0]['id']) == rows[0]
+    assert db.segment_by_id(-1) is None
+    db.mark_deleted([rows[0]['id']])
+    assert db.segment_by_id(rows[0]['id'])['deleted_at'] is not None

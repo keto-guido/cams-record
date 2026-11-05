@@ -2,7 +2,7 @@
 
 The self-hosted NVR on the Synology DVA3221 ("Jefferson"): a **headless continuous recorder** that
 writes 60 s MP4 segments from go2rtc, indexes them in the NAS's **MariaDB** and enforces
-**retention**. There is no UI or playback yet.
+**retention**, timeline playback and range exports.
 
 - One supervised `ffmpeg` per (camera, quality), reading go2rtc RTSP
   (`rtsp://127.0.0.1:8554/<stream>`, host network). It **stream-copies only** and never
@@ -497,3 +497,31 @@ path if any row (including a tombstone) protects it, deletion marks every row of
 the file, retention budgets count files once, and clip selection uses each path
 once. Run only one recorder/indexer writer per recording root/database; path
 deduplication is serialized in that writer, rather than enforced by a unique key.
+
+## Timeline, playback and range exports (Phase 3)
+
+All routes below accept the same App Hub `admin` or `cams` JWT as `/api/clip`.
+Browser requests use `/cams-record/api/…`; the proxy keeps the prefix.
+Times accept epoch seconds or ISO8601 with an explicit timezone.
+
+| GET route | Purpose |
+|---|---|
+| `/api/timeline?cam=front-door&start=…&end=…` | Main/sub recorded spans, gap tolerance and latest indexed ends; `camera` aliases `cam`; maximum 8 days |
+| `/api/playback?cam=front-door&start=…&end=…` | Sub-quality media offsets and relative HLS playlist URL; maximum 26 hours |
+| `/api/hls/{cam}/index.m3u8?start=…&end=…` | VOD playlist with UTC program times and discontinuities at gaps, codec changes and UTC days |
+| `/api/hls/{cam}/seg/{id}.ts` | Sub segment remuxed to MPEG-TS, with copied video and audio; private cache |
+| `/api/export/info?cam=front-door&start=…&end=…` | Availability, estimated bytes, recommended quality and export busy state |
+| `/api/export?cam=front-door&start=…&end=…&quality=main&fallback=1` | Attachment download; falls back to sub only when main is gone; `X-Export-Quality` identifies the result |
+
+Timeline and playback default to the current local day in `clips.timezone` when both times
+are omitted. Playback uses whole indexed files, dropping restart overlaps, so its first/last
+entry can extend beyond the requested window. Gaps consume no media time.
+The App Hub camera page provides day navigation, zoom/pan, detections, playback and range handles.
+
+Exports allow `clips.export_max_s` seconds (default 1800, environment `CLIP_EXPORT_MAX_S`);
+existing clips remain limited to 300 seconds. Only one export runs at once, including its
+response download; busy requests return 429 with `Retry-After: 15`. Unindexed footage returns
+425. Exports require at least 2 GB free after the estimated output, live in
+`recording.state_dir/exports`, and are deleted after the response. All video/audio assembly
+uses stream copy, with an audio-free retry if copying audio fails; no video transcoding occurs.
+HLS remuxes run at most three at once and use a separate 512 MiB / 6 hour LRU cache.

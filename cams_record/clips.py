@@ -39,9 +39,10 @@ def parse_time(value):
     return result
 
 
-def validate_window(start, end):
-    if end <= start or end - start > 300:
-        raise ClipError(400, "clip window must be positive and at most 5 minutes")
+def validate_window(start, end, max_s=300):
+    if end <= start or end - start > max_s:
+        raise ClipError(400, "clip window must be positive and at most 5 minutes" if max_s == 300
+                        else f"window must be positive and at most {max_s:g} seconds")
 
 
 def select_segments(rows, latest, start, end, gap_tolerance_s=2.0):
@@ -194,3 +195,18 @@ class Clips:
                     os.replace(output, target)
                     self.cleanup()
                     return self._result(target, lease)
+
+
+def merge_spans(rows, start, end, gap_tolerance_s=2):
+    spans = []
+    for row in sorted(rows, key=lambda r: r["start_ts"]):
+        if row.get("missing") or row.get("deleted_at"):
+            continue
+        a, b = max(start, row["start_ts"]), min(end, row["end_ts"])
+        if b <= a:
+            continue
+        if spans and a - spans[-1][1] <= gap_tolerance_s:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    return spans

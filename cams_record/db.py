@@ -252,6 +252,29 @@ class Database:
                  "fps": float(r[9]) if r[9] is not None else None, "missing": bool(r[10])}
                 for r in self.run(q)]
 
+    def segment_rows(self, camera, quality, start, end):
+        def q(cur):
+            cur.execute("""SELECT id, camera_id, quality, start_ts, end_ts, path, codec,
+                           size_bytes, missing, deleted_at FROM segments
+                           WHERE camera_id=%s AND quality=%s AND start_ts<%s AND end_ts>%s
+                           ORDER BY start_ts, id""", (camera, quality, to_dt(end), to_dt(start)))
+            return [self._segment_row(r) for r in cur.fetchall()]
+        return self.run(q)
+
+    @staticmethod
+    def _segment_row(r):
+        return dict(zip(("id", "camera_id", "quality", "start_ts", "end_ts", "path", "codec",
+                         "size", "missing", "deleted_at"),
+                        (*r[:3], from_dt(r[3]), from_dt(r[4]), *r[5:]), strict=True))
+
+    def segment_by_id(self, segment_id):
+        def q(cur):
+            cur.execute("""SELECT id, camera_id, quality, start_ts, end_ts, path, codec,
+                           size_bytes, missing, deleted_at FROM segments WHERE id=%s""", (segment_id,))
+            row = cur.fetchone()
+            return self._segment_row(row) if row else None
+        return self.run(q)
+
     def clip_segments(self, camera: str, quality: str, start: float, end: float) -> tuple[list[dict], float | None]:
         def q(cur):
             cur.execute("SELECT MAX(end_ts) FROM segments WHERE camera_id=%s AND quality=%s",
