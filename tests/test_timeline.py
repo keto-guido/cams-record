@@ -120,3 +120,116 @@ def test_playback_limits_and_export_not_ready(setup):
                 rows()[0] | {'path': '../escape.mp4'}]:
         db.segment_by_id.return_value = row
         assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 404
+
+
+async def disconnect_request(app, url, on_body):
+    path, _, query = url.partition('?')
+    scope = dict(type='http', asgi={'version': '3.0', 'spec_version': '2.4'}, http_version='1.1', method='GET',
+                 scheme='http', path=path, raw_path=path.encode(), query_string=query.encode(),
+                 root_path='', headers=[(k.encode(), v.encode()) for k, v in HEADERS.items()],
+                 server=('testserver', 80), client=('testclient', 123))
+
+    async def receive():
+        return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+    async def send(message):
+        if message['type'] == 'http.response.start':
+            assert message['status'] == 200
+        if message['type'] == 'http.response.body':
+            on_body()
+            raise OSError('client disconnected')
+
+    with pytest.raises(OSError, match='client disconnected'):
+        await app(scope, receive, send)
+
+
+def test_export_disconnect_cleanup(setup, monkeypatch):
+    import asyncio
+
+    cfg, db, client = setup
+    db.segment_rows.return_value = [rows()[0] | {'size': 7}]
+    media = client.app.app.state.media
+
+    def run(self, command, timeout):
+        Path(command[-1]).write_bytes(b'export')
+        return True
+
+    monkeypatch.setattr(Media, 'run', run)
+    url = '/api/export?cam=cam&start=10&end=40'
+
+    def during_send():
+        assert list(media.exports.glob('*.mp4'))
+        assert not media.export_slot.acquire(blocking=False)
+
+    asyncio.run(disconnect_request(client.app, url, during_send))
+    assert not list(media.exports.glob('*.mp4'))
+    assert client.get(url, headers=HEADERS).status_code == 200
+    assert not list(media.exports.glob('*.mp4'))
+
+
+def test_ts_disconnect_cleanup(setup, monkeypatch):
+    import asyncio
+
+    cfg, db, client = setup
+    db.segment_by_id.return_value = rows()[0]
+    media = client.app.app.state.media
+
+    def run(self, command, timeout):
+        Path(command[-1]).write_bytes(b'transport stream')
+        return True
+
+    monkeypatch.setattr(Media, 'run', run)
+
+    def during_send():
+        assert list(media.hls.glob('*.lease'))
+
+    asyncio.run(disconnect_request(client.app, '/api/hls/cam/seg/1.ts', during_send))
+    assert not list(media.hls.glob('*.lease'))
+    assert list(media.hls.glob('*.ts'))
+    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert not list(media.hls.glob('*.lease'))
+
+
+def test_stale_media_cleanup(setup, monkeypatch):
+    import os
+    import time
+
+    cfg, db, client = setup
+    media = client.app.app.state.media
+    media.exports.mkdir(parents=True, exist_ok=True)
+    old = media.exports / 'old.mp4'
+    fresh = media.exports / 'fresh.mp4'
+    for path in (old, fresh):
+        path.write_bytes(b'export')
+    os.utime(old, (time.time() - 7201,) * 2)
+    Media(media.clips, cfg)
+    assert not old.exists()
+    assert fresh.exists()
+
+    old.write_bytes(b'export')
+    os.utime(old, (time.time() - 7201,) * 2)
+    db.segment_rows.return_value = [rows()[0] | {'size': 7}]
+    db.segment_by_id.return_value = rows()[0]
+
+    def run(self, command, timeout):
+        Path(command[-1]).write_bytes(b'media')
+        return True
+
+    monkeypatch.setattr(Media, 'run', run)
+    assert client.get('/api/export?cam=cam&start=10&end=40', headers=HEADERS).status_code == 200
+    assert not old.exists()
+    assert fresh.exists()
+
+    media.hls.mkdir(parents=True, exist_ok=True)
+    stale_lease, fresh_lease = media.hls / 'old.lease', media.hls / 'fresh.lease'
+    for path in (stale_lease, fresh_lease):
+        path.write_bytes(b'lease')
+    os.utime(stale_lease, (time.time() - 3601,) * 2)
+    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert not stale_lease.exists()
+    assert fresh_lease.exists()
+    stale_lease.write_bytes(b'lease')
+    os.utime(stale_lease, (time.time() - 3601,) * 2)
+    monkeypatch.setattr(Media, 'run', lambda *a: pytest.fail('cache missed'))
+    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert not stale_lease.exists()

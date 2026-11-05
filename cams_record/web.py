@@ -20,6 +20,23 @@ from .media import Media, playback_entries, playlist
 log = logging.getLogger(__name__)
 
 
+class CleanupFileResponse(FileResponse):
+    """Release disposable files even when sending fails or is cancelled."""
+
+    def __init__(self, *args, cleanup, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cleanup = cleanup
+        self.cleaned = False
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self.cleaned:
+                self.cleaned = True
+                self.cleanup()
+
+
 class BasePathMiddleware:
     """Accept requests both with and without the BASE_PATH prefix (App Hub may strip it)."""
 
@@ -126,8 +143,8 @@ def create_app(service, cfg: dict):
         if service.db is None:
             raise ClipError(503, "segment index unavailable")
         path = media.ts(cam, segment_id)
-        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "private, max-age=86400"},
-                            background=BackgroundTask(path.unlink, missing_ok=True))
+        return CleanupFileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "private, max-age=86400"},
+                                   cleanup=lambda: path.unlink(missing_ok=True))
 
     def export_info_data(camera, start, end):
         main, sub = (media.estimate(camera, q, start, end) for q in ("main", "sub"))
@@ -170,8 +187,8 @@ def create_app(service, cfg: dict):
         zone = ZoneInfo(cfg["clips"]["timezone"])
         stamp = datetime.fromtimestamp(start, zone).strftime("%Y%m%d-%H%M%S")
         stop = datetime.fromtimestamp(end, zone).strftime("%H%M%S")
-        return FileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{stop}_{quality}.mp4",
-                            headers={"X-Export-Quality": quality}, background=BackgroundTask(finish))
+        return CleanupFileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{stop}_{quality}.mp4",
+                                   headers={"X-Export-Quality": quality}, cleanup=finish)
 
     @r.get("/api/clip/info")
     def clip_info(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",

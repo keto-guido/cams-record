@@ -62,6 +62,20 @@ class Media:
         self.remuxes = threading.BoundedSemaphore(3)
         self.export_slot = threading.BoundedSemaphore(1)
         self.cache_lock = threading.Lock()
+        self.trim_exports()
+
+    @staticmethod
+    def trim_old(directory, pattern, age):
+        cutoff = time.time() - age
+        for path in directory.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass  # A response may have finished while trimming.
+
+    def trim_exports(self):
+        self.trim_old(self.exports, '*', 2 * 3600)
 
     def run(self, command, timeout):
         prefix = []
@@ -91,6 +105,7 @@ class Media:
         target = self.hls / f'{segment_id}_{os.stat(source).st_mtime_ns}.ts'
         with self.remuxes:
             with self.cache_lock:
+                self.trim_old(self.hls, '*.lease', 3600)
                 if target.exists():
                     target.touch()
                     return self.lease(target)
@@ -139,6 +154,7 @@ class Media:
         return dict(status=state, bytes=math.ceil(total))
 
     def export(self, camera, quality, start, end, estimate):
+        self.trim_exports()
         self.exports.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(self.exports).free - estimate < 2_000_000_000:
             raise ClipError(507, 'insufficient export space')
