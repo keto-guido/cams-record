@@ -117,3 +117,5 @@ button.tl-cancel{position:absolute;right:0;top:0}
  .tl-controls>button.tl-icon{flex:0 0 44px;width:44px}
  .cam-mode{font-size:10px}.tl-times{gap:6px}
 }
+
+button.camtile:focus-visible{outline:2px solid var(--mn-accent);outline-offset:3px}button.tl-det[aria-disabled=true]{opacity:1}

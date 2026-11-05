@@ -21,7 +21,7 @@ for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-dat
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
 assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=15'));
-assert(html.includes('cams.css?v=11'));
+assert(html.includes('cams.css?v=12'));
 // Shared navigation: the hub's page() renders the bar from these; sections use the one sub-nav pattern.
 assert.deepEqual(pageOptions, {app:'cams',name:'Cameras'});
 assert(html.includes('<nav class="mn-subnav cams-tabs" id="cams-tabs"'));
