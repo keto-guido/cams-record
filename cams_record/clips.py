@@ -79,14 +79,17 @@ def select_segments(rows, latest, start, end, gap_tolerance_s=2.0):
 
 
 def ffmpeg_command(ffmpeg, listing, output, rows, start, end, audio=True):
-    cmd = [ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
-           "-ss", str(max(0, start - rows[0]["start_ts"])), "-to", str(end - rows[0]["start_ts"]),
+    # Input seeking retains the preceding keyframe when stream copying. The
+    # duration is relative to the requested seek, so that early frames are extra.
+    cmd = [ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0",
+           "-ss", str(max(0, start - rows[0]["start_ts"])), "-i", str(listing),
+           "-t", str(end - max(start, rows[0]["start_ts"])),
            "-map", "0:v:0"]
     cmd += ["-map", "0:a?"] if audio else ["-an"]
     cmd += ["-c", "copy"]
     if rows[0].get("codec", "") in ("hevc", "h265"):
         cmd += ["-tag:v", "hvc1"]
-    return cmd + ["-movflags", "+faststart", str(output)]
+    return cmd + ["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(output)]
 
 
 class Clips:
@@ -158,8 +161,11 @@ class Clips:
             with tempfile.TemporaryDirectory(dir=self.cache) as tmp:
                 listing, output = Path(tmp) / "concat.txt", Path(tmp) / "clip.mp4"
                 paths = [resolve_segment_path(self.root, r["path"])[0] for r in rows]
+                # The concat demuxer needs every duration to support seeking.
                 listing.write_text(
-                    "".join("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n" for p in paths),
+                    "".join("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n"
+                            + f"duration {r['end_ts'] - r['start_ts']}\n"
+                            for p, r in zip(paths, rows, strict=True)),
                     encoding="utf-8")
                 prefix = []
                 if shutil.which("nice"):

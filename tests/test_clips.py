@@ -33,7 +33,11 @@ def test_selection(rows, latest, start, end, state):
 def test_command_and_window():
     cmd = ffmpeg_command("ffmpeg", "list", "out", [seg(100, 160)], 110, 140)
     assert cmd[cmd.index("-ss") + 1] == "10"
-    assert cmd[cmd.index("-to") + 1] == "40"
+    assert cmd.index("-ss") < cmd.index("-i") < cmd.index("-t")
+    assert cmd[cmd.index("-t") + 1] == "30"
+    assert "-to" not in cmd
+    assert cmd[cmd.index("-avoid_negative_ts") + 1] == "make_zero"
+    assert cmd[cmd.index("-movflags") + 1] == "+faststart"
     assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
     assert event_window(100, None, {}) == (95, 115)
     assert event_window(100, 110, {}) == (95, 115)
@@ -195,6 +199,63 @@ def test_real_ffmpeg_concat(setup, tmp_path):
     info = json.loads(result.stdout)
     assert 3 <= float(info["format"]["duration"]) <= 5
     assert {s["codec_type"] for s in info["streams"]} == {"video", "audio"}
+
+
+@pytest.mark.parametrize("start,end", [(6, 18), (16, 28), (26, 38)])
+def test_long_gop_clip_covers_requested_window(setup, start, end):
+    import json
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not installed")
+    cfg, db, _ = setup
+    cfg["recording"]["ffmpeg"] = "ffmpeg"
+    root = Path(cfg["recording"]["root"])
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10",
+        "-t", "40", "-c:v", "libx264", "-preset", "ultrafast", "-g", "100",
+        "-keyint_min", "100", "-sc_threshold", "0", "-f", "segment", "-segment_time", "20",
+        "-reset_timestamps", "1", str(root / "long%d.mp4"),
+    ], check=True, capture_output=True)
+    rows = [seg(100, 120) | {"path": "long0.mp4", "codec": "h264"},
+            seg(120, 140) | {"path": "long1.mp4", "codec": "h264"}]
+    db.clip_segments.return_value = (rows, 140)
+    path = Clips(db, cfg).build("front-door", "main", 100 + start, 100 + end)
+
+    def probe(path):
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_packets",
+                "-show_format", "-of", "json", str(path),
+        ], check=True, capture_output=True)
+        return json.loads(result.stdout)
+
+    info = probe(path)
+    packets = info["packets"]
+    # Match decoded frames to source times: normalized output timestamps
+    # alone cannot tell whether the clip actually contains the requested window.
+    def frame_hashes(path):
+        result = subprocess.run([
+            "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
+            "-f", "framemd5", "-",
+        ], check=True, capture_output=True, text=True)
+        return [line.split(",")[-1].strip() for line in result.stdout.splitlines()
+                if line and not line.startswith("#")]
+
+    source_times = {}
+    for index in range(2):
+        hashes = frame_hashes(root / f"long{index}.mp4")
+        for frame in range(len(hashes) - 9):
+            source_times[tuple(hashes[frame:frame + 10])] = index * 20 + frame / 10
+    output_frames = frame_hashes(path)
+    first = source_times[tuple(output_frames[:10])]
+    last = source_times[tuple(output_frames[-10:])] + 1
+    assert "K" in packets[0]["flags"]
+    assert first == pytest.approx((start // 10) * 10)
+    assert first <= start
+    assert last >= end - 0.01
+    assert float(info["format"]["duration"]) >= end - start
+    assert float(packets[0]["dts_time"]) >= 0
 
 
 def test_timeout_leaves_no_cached_output(setup, monkeypatch):
