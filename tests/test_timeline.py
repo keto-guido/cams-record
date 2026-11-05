@@ -41,8 +41,8 @@ def test_timeline_and_playlist(setup):
         assert client.get('/api/timeline', params=dict(cam='cam', start=0, end=end), headers=HEADERS).status_code == 400
     assert client.get('/api/timeline?cam=cam', headers=HEADERS).status_code == 200
     p = client.get('/api/playback?cam=cam&start=0&end=200', headers=HEADERS).json()
-    assert [e['id'] for e in p['segments']] == [1, 3]
-    assert p['segments'][1]['offset'] == 60
+    assert [e['id'] for e in p['segments']] == [1, 2, 3]
+    assert p['segments'][2]['offset'] == 110
     assert p['playlist'].startswith('hls/cam/')
     r = client.get('/api/hls/cam/index.m3u8?start=0&end=200', headers=HEADERS)
     assert r.status_code == 200
@@ -95,11 +95,18 @@ def test_playback_duplicates_and_overlap_limit():
               seg(120, 120.9700005), seg(120.5, 180), seg(121, 181)]
     entries = playback_entries([r | {'id': i} for i, r in enumerate(source)], 10, 200)
     assert [e['id'] for e in entries] == [1, 2, 5]
-    # A 4.134-second overlap exceeds the default tolerance.
-    entries = playback_entries([seg(1793846425.0, 1793846466.133) | {'id': 1},
-                                seg(1793846461.999, 1793846521.999) | {'id': 2}],
-                               1793846425.0, 1793846521.999)
-    assert [e['id'] for e in entries] == [1]
+    from cams_record.media import playlist
+    entries = playback_entries([
+        seg(1793846425.0, 1793846466.133) | {'id': 2629},
+        seg(1793846461.999, 1793846521.973) | {'id': 2639},
+        seg(1793846521.973, 1793846581.973) | {'id': 2640}],
+        1793846425.0, 1793846581.973)
+    assert [e['id'] for e in entries] == [2629, 2639, 2640]
+    assert [e['duration'] for e in entries] == pytest.approx([41.133, 59.974, 60])
+    text = playlist(entries, 2)
+    assert text.count('#EXT-X-DISCONTINUITY') == 1
+    assert text.index('seg/2629.ts') < text.index('#EXT-X-DISCONTINUITY') < text.index('seg/2639.ts')
+
 
 
 @needs_ffmpeg

@@ -27,8 +27,7 @@ def playback_entries(rows, start, end, gap_tolerance_s=2.0):
                 or row['end_ts'] <= start or row['start_ts'] >= end):
             continue
         # Boundary jitter is normal; retain each file's full media duration.
-        if entries and (row['start_ts'] < entries[-1]['end'] - gap_tolerance_s
-                        or row['end_ts'] <= entries[-1]['end'] + 1e-6):
+        if entries and row['end_ts'] <= entries[-1]['end'] + gap_tolerance_s:
             continue
         duration = row['end_ts'] - row['start_ts']
         if duration <= 0:
