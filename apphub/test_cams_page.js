@@ -20,10 +20,16 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=13'));
-assert(html.includes('cams.css?v=9'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=14'));
+assert(html.includes('cams.css?v=10'));
 assert(html.includes('id="tl-det-prev" aria-label="Previous detection"'));
 assert(html.includes('id="tl-det-next" aria-label="Next detection"'));
 assert(html.includes('>Prev event<') && html.includes('>Next event<'));
 assert(html.includes('id="cam-toast" hidden'));
+assert(html.includes('class="cd-lb-hd" aria-pressed="false"'));
+// Plain links stay the desktop path; the share flow only intercepts their tap.
+assert(/<a class="cd-dl-snap" href="#" download hidden>/.test(html) && /<a class="cd-dl-clip" href="#" download hidden>/.test(html) && /<a id="tl-download" download hidden>/.test(html));
+const client = fs.readFileSync(path.join(__dirname, 'static', 'cams.js'), 'utf8');
+assert(client.split('async function saveShare')[1].split('await ')[1].startsWith('navigator.share('), 'share must be the first await in the tap');
+assert(client.includes('MAX_SHARE = 250e6'));
 app.handle({method:'GET'}, {done:r=>{assert.equal(r.status,200);assert(r.type.startsWith('application/javascript'));assert.equal(r.headers['Cache-Control'],'private, max-age=86400');fs.rmSync(dir,{recursive:true});console.log('camera page tests passed');}}, {}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));

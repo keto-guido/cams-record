@@ -69,12 +69,109 @@
     fillCamFilter();
   });
 
+  // ---------- save to Photos ----------
+  // iOS only offers "Save Image/Video" from the share sheet, and <a download> lands in Files. Sharing needs the bytes up
+  // front and a live tap: a slow fetch outlasts the tap, so the file is buffered first and a second tap ("Save to Photos")
+  // shares it. Desktop browsers expose navigator.share too but have no Photos step, so they keep the plain link.
+  const MAX_SHARE = 250e6, FAST_SHARE_MS = 1000, OBJECT_URL_MS = 60000;
+  const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const PHONE = IOS || /Android/.test(navigator.userAgent);
+  const shareable = file => { try { return PHONE && typeof navigator.share === 'function' && typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] }); } catch (e) { return false; } };
+  const fileStamp = ts => { const d = new Date(ts * 1000), p = n => String(n).padStart(2, '0'); return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()); };
+  function dispositionName(header) {
+    let m = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(header || ''), name = '';
+    if (m) try { name = decodeURIComponent(m[1].trim()); } catch (e) { name = ''; }
+    if (!name && (m = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(header || ''))) name = (m[1] || m[2] || '').trim();
+    return name.split(/[\\/]/).pop();
+  }
+  function saveIdle(j) { if (j.label) j.link.textContent = j.label; j.label = ''; j.link.removeAttribute('aria-busy'); }
+  function saveRelease(j) {
+    if (j.ctl) j.ctl.abort();
+    clearTimeout(j.timer);
+    if (j.objUrl) URL.revokeObjectURL(j.objUrl);
+    if (j.alt) { j.alt.remove(); j.link.hidden = false; }
+    saveIdle(j);
+    Object.assign(j, { ctl: null, file: null, alt: null, objUrl: null, plain: false });
+  }
+  function saveSwap(j, el) { el.classList.add('cd-save'); if (j.alt) j.alt.remove(); j.alt = el; j.link.after(el); j.link.hidden = true; el.focus(); }
+  function saveFallback(j, file) {
+    const a = document.createElement('a');
+    j.objUrl = URL.createObjectURL(file); a.href = j.objUrl; a.download = file.name; a.textContent = 'Save file';
+    a.addEventListener('click', () => { clearTimeout(j.timer); j.timer = setTimeout(() => saveRelease(j), OBJECT_URL_MS); });
+    saveSwap(j, a);
+  }
+  // navigator.share() must run synchronously inside the tap: no await may come before it.
+  async function saveShare(j, file, fast) {
+    if (j.sharing) return;
+    j.sharing = true;
+    try { await navigator.share({ files: [file] }); if (j.file === file) saveRelease(j); }
+    catch (e) { if (j.file === file && e.name !== 'AbortError' && !(fast && e.name === 'NotAllowedError')) saveFallback(j, file); }
+    finally { j.sharing = false; }
+  }
+  function saveOffer(j, file, fast) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = 'Save to Photos'; b.addEventListener('click', () => saveShare(j, file, false));
+    saveSwap(j, b);
+    if (fast) saveShare(j, file, true);
+  }
+  // Oversized but only known once the response arrived: the plain link needs a new tap, as an aborted export holds its slot for a moment.
+  function saveTooBig(j) { saveRelease(j); j.plain = true; j.status.textContent = IOS ? 'Large file: tap Download again to save it to Files; open it there and choose Save Video' : 'Large file: tap Download again.'; }
+  async function savePrepare(j, o, max) {
+    const ctl = j.ctl = new AbortController(), began = performance.now(), link = j.link;
+    j.label = link.textContent; link.textContent = 'Preparing…'; link.setAttribute('aria-busy', 'true');
+    try {
+      const r = await fetch(o.url, { credentials: 'same-origin', signal: ctl.signal });
+      if (!r.ok) throw new Error(r.status === 429 ? 'Another export is running. Try again shortly.' : 'Download failed (' + r.status + ').');
+      if (+r.headers.get('content-length') > max) return saveTooBig(j);
+      const served = (r.headers.get('content-type') || '').split(';')[0].trim(), type = /^(image|video)\//i.test(served) ? served : o.type;
+      const name = (o.keepServerName && dispositionName(r.headers.get('content-disposition'))) || o.filename;
+      let blob;
+      if (r.body && r.body.getReader) {
+        const reader = r.body.getReader(), parts = []; let got = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          parts.push(value); got += value.length;
+          if (got > max) return saveTooBig(j);
+          link.textContent = 'Preparing… ' + Math.round(got / 1e6) + ' MB';
+        }
+        blob = new Blob(parts, { type });
+      } else blob = await r.blob();
+      if (j.ctl !== ctl) return;
+      const file = new File([blob], name, { type });
+      j.ctl = null; j.file = file; saveIdle(j);
+      if (shareable(file)) saveOffer(j, file, performance.now() - began < FAST_SHARE_MS); else saveFallback(j, file);
+    } catch (e) {
+      if (j.ctl !== ctl) return;
+      saveRelease(j); j.status.textContent = e instanceof TypeError ? 'Download failed. Check your connection.' : e.message;
+    }
+  }
+  // Returns true when it took over the tap; false leaves the <a download> to navigate as usual.
+  function saveMedia({ url, filename, type, maxShareBytes = MAX_SHARE, size = 0, keepServerName = false, job }) {
+    if (job.ctl) return true;
+    if (job.plain || !shareable(new File(['x'], filename, { type }))) return false;
+    if (size > maxShareBytes) { if (IOS) job.status.textContent = 'Large file: saved to Files; open it there and choose Save Video'; return false; }
+    savePrepare(job, { url, filename, type, keepServerName }, maxShareBytes);
+    return true;
+  }
+  function saveJob(link, status) {
+    const j = { link, status, opts: null, ctl: null, file: null, alt: null, objUrl: null, timer: 0, label: '', plain: false, sharing: false };
+    link.addEventListener('click', ev => { if (j.opts && saveMedia({ ...j.opts, job: j })) ev.preventDefault(); });
+    return j;
+  }
+  function saveArm(j, opts) {
+    if (j.opts && j.opts.url === opts.url && (j.ctl || j.alt)) return; // A retry must not discard a file being prepared.
+    saveRelease(j); j.opts = opts; j.link.href = opts.url; j.link.download = opts.keepServerName ? '' : opts.filename; j.link.hidden = false;
+  }
+
   // ---------- detection clip player (modal) ----------
   // Plays a low-res (sub) clip from cams-record around the detection; downloads use full-res (main) when still kept.
+  // The low-res snapshot carries the aligned boxes; the high-res one is grabbed later without boxes, so it is opt-in (HD) and the download.
   const CR = '/cams-record', STALL_MS = 12000, PRE = 5, POST = 5, NOEND = 10, MAXWIN = 120, CLIP_RETRY = 15000;
   const lb = $('cd-lb'), lbV = lb.querySelector('video'), lbImg = lb.querySelector('img'), lbInfo = lb.querySelector('.cd-lb-info'),
-    lbMsg = lb.querySelector('.cd-lb-msg'), lbSnap = lb.querySelector('.cd-dl-snap'), lbClip = lb.querySelector('.cd-dl-clip'), lbNote = lb.querySelector('.cd-lb-note');
-  let lbEv = null, lbTimer = null;
+    lbMsg = lb.querySelector('.cd-lb-msg'), lbSnap = lb.querySelector('.cd-dl-snap'), lbClip = lb.querySelector('.cd-dl-clip'), lbNote = lb.querySelector('.cd-lb-note'), lbHd = lb.querySelector('.cd-lb-hd');
+  const lbSnapSave = saveJob(lbSnap, lbNote), lbClipSave = saveJob(lbClip, lbNote);
+  let lbEv = null, lbTimer = null, lbLow = '', lbHigh = '', lbHiRes = false;
   const recCam = e => Object.keys(detOf).find(h => detOf[h] === e.camera) || e.camera;
   function win(e) {
     const s = e.start_ts - PRE; let t = (e.end_ts && e.end_ts > e.start_ts ? e.end_ts : e.start_ts + NOEND) + POST;
@@ -86,16 +183,27 @@
   function lbClose() {
     lb.hidden = true; clearTimeout(lbTimer); lbTimer = null; lbEv = null;
     lbV.pause(); lbV.removeAttribute('src'); lbV.load(); lbV.hidden = true; lbImg.removeAttribute('src');
+    lbHiRes = false; lbHd.hidden = true; lbHd.setAttribute('aria-pressed', 'false');
+    saveRelease(lbSnapSave); saveRelease(lbClipSave);
     document.body.classList.remove('cd-lb-open');
+  }
+  const lbPlay = () => { const p = lbV.play(); if (p && p.catch) p.catch(() => {}); };
+  // HD takes over from the clip while on; turning it off returns to the clip, or to the low-res snapshot if there is none.
+  function lbHdSet(on) {
+    lbHiRes = on; lbHd.setAttribute('aria-pressed', String(on)); lbImg.src = on ? lbHigh : lbLow;
+    const clip = !!lbV.getAttribute('src');
+    lbImg.hidden = clip && !on; lbV.hidden = !clip || on;
+    if (clip) { if (on) lbV.pause(); else lbPlay(); }
   }
   function lbTry(e) {
     if (lbEv !== e) return;
     fetch(infoQ(e), { credentials: 'same-origin' }).then(r => r.ok ? r.json() : Promise.reject(r.status)).then(j => {
       if (lbEv !== e) return;
       const sub = stOf(j, 'sub'), main = stOf(j, 'main');
-      if (main === 'available') { lbClip.href = clipQ(e, 'main', 1); lbClip.hidden = false; lbNote.textContent = ''; }
-      else if (sub === 'available') { lbClip.href = clipQ(e, 'sub', 1); lbClip.hidden = false; lbNote.textContent = main === 'not_ready' ? '' : 'Full-res footage is no longer kept; the clip download is low-res.'; }
-      const play = q => { lbMsg.textContent = q === 'main' ? 'Low-res copy unavailable; playing full-res.' : ''; lbImg.hidden = true; lbV.hidden = false; lbV.src = clipQ(e, q, 0); const p = lbV.play(); if (p && p.catch) p.catch(() => {}); };
+      const armClip = q => saveArm(lbClipSave, { url: clipQ(e, q, 1), filename: recCam(e) + '_' + fileStamp(e.start_ts) + '_clip.mp4', type: 'video/mp4', keepServerName: true });
+      if (main === 'available') { armClip('main'); lbNote.textContent = ''; }
+      else if (sub === 'available') { armClip('sub'); lbNote.textContent = main === 'not_ready' ? '' : 'Full-res footage is no longer kept; the clip download is low-res.'; }
+      const play = q => { lbMsg.textContent = q === 'main' ? 'Low-res copy unavailable; playing full-res.' : ''; lbV.src = clipQ(e, q, 0); if (!lbHiRes) { lbImg.hidden = true; lbV.hidden = false; lbPlay(); } };
       if (sub === 'available') play('sub');
       else if (sub === 'not_ready' || main === 'not_ready') { lbMsg.textContent = 'Clip available in about a minute…'; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); }
       else if (main === 'available') play('main');
@@ -108,18 +216,21 @@
   }
   function lbOpen(e) {
     lbClose(); lbEv = e;
-    const name = e.camera_name || detName[e.camera] || e.camera, label = cap(e.label), snap = CD + '/api/events/' + encodeURIComponent(e.id) + '/snapshot' + (e.has_snapshot_hires ? '_hires' : '') + '.jpg';
+    const name = e.camera_name || detName[e.camera] || e.camera, label = cap(e.label), base = CD + '/api/events/' + encodeURIComponent(e.id), low = base + '/snapshot.jpg', high = base + '/snapshot_hires.jpg';
     lbInfo.textContent = label + ' · ' + name + ' · ' + fmt(e.start_ts);
-    if (e.has_snapshot || e.has_snapshot_hires) { lbImg.src = snap; lbImg.alt = label + ' at ' + name; lbImg.hidden = false; lbSnap.href = snap; lbSnap.hidden = false; }
-    else { lbImg.hidden = true; lbSnap.hidden = true; }
-    lbSnap.setAttribute('download', recCam(e) + '_' + e.id + '.jpg');
+    lbLow = e.has_snapshot ? low : high; lbHigh = e.has_snapshot && e.has_snapshot_hires ? high : ''; lbHd.hidden = !lbHigh;
+    if (e.has_snapshot || e.has_snapshot_hires) {
+      lbImg.src = lbLow; lbImg.alt = label + ' at ' + name; lbImg.hidden = false;
+      saveArm(lbSnapSave, { url: e.has_snapshot_hires ? high : low, filename: recCam(e) + '_' + fileStamp(e.start_ts) + '.jpg', type: 'image/jpeg' });
+    } else { lbImg.hidden = true; lbSnap.hidden = true; }
     lbClip.hidden = true; lbNote.textContent = ''; lbMsg.textContent = 'Loading clip…';
     lb.hidden = false; document.body.classList.add('cd-lb-open'); lb.querySelector('.cd-lb-x').focus();
     lbTry(e);
   }
   lb.querySelector('.cd-lb-x').addEventListener('click', lbClose);
+  lbHd.addEventListener('click', () => lbHdSet(!lbHiRes));
   lb.addEventListener('click', ev => { if (ev.target === lb) lbClose(); });
-  lbV.addEventListener('error', () => { if (lbEv && !lbV.hidden && lbV.getAttribute('src')) { lbMsg.textContent = 'Clip failed to play. Retrying…'; lbV.hidden = true; lbImg.hidden = !lbImg.getAttribute('src'); clearTimeout(lbTimer); const e = lbEv; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); } });
+  lbV.addEventListener('error', () => { if (lbEv && lbV.getAttribute('src')) { lbMsg.textContent = 'Clip failed to play. Retrying…'; lbV.removeAttribute('src'); lbV.hidden = true; lbImg.hidden = !lbImg.getAttribute('src'); clearTimeout(lbTimer); const e = lbEv; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); } });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !lb.hidden) lbClose(); });
 
   // ---------- detections list (shared by the tab and the camera page) ----------
@@ -213,6 +324,7 @@
   const localDate = d => [d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');
   const dayBounds = t => { const d=new Date(t*1000);d.setHours(0,0,0,0);const a=+d/1000;d.setDate(d.getDate()+1);return [a,+d/1000]; };
   const get = async url => { const r=await fetch(url,{credentials:'same-origin'});if(!r.ok)throw new Error('Recording unavailable ('+r.status+')');return r.json(); };
+  const tlSave=saveJob($('tl-download'),$('tl-export-msg'));
   let tlCam=null,generation=0,hls=null,data=null,mode='live',center=Date.now()/1000,zoom=3;
   let spans={},events=[],selected=false,rangeS=0,rangeE=0,exportTimer=null,exportSeq=0,pollTimer=null,followTimer=null,raf=0,loadTimer=null;
   let seekSequence=0,watchdog=0,gesture=null,windowKey='',playDay='',soundWanted=false,loadedCenter=0;
@@ -239,7 +351,7 @@
     updatePill();
   }
   function releasePlayback(){seekSequence++;if(hls)hls.destroy();hls=null;data=null;playDay='';v.onerror=null;v.onplaying=null;v.pause();v.removeAttribute('src');v.load();v.disableRemotePlayback=false;$('cam-retry').hidden=true;}
-  function timelineStop(){generation++;tlCam=null;releasePlayback();clearTimeout(exportTimer);clearTimeout(loadTimer);clearInterval(pollTimer);clearInterval(followTimer);cancelAnimationFrame(raf);raf=0;exportSeq++;pointers.clear();gesture=null;cache.clear();playCache.clear();}
+  function timelineStop(){generation++;tlCam=null;saveRelease(tlSave);releasePlayback();clearTimeout(exportTimer);clearTimeout(loadTimer);clearInterval(pollTimer);clearInterval(followTimer);cancelAnimationFrame(raf);raf=0;exportSeq++;pointers.clear();gesture=null;cache.clear();playCache.clear();}
   async function refreshTimeline(force=false){if(!tlCam||!visible())return;const g=generation,a=Math.floor((center-span()*1.5)/3600)*3600,b=Math.ceil((center+span()*1.5)/3600)*3600,key=localDate(new Date(center*1000))+':'+a+':'+b;windowKey=key;
     try{let j=cache.get(key);if(!j||force){const timeline=await get(CR+'/api/timeline?'+query(a,b));await cdReady;if(g!==generation)return;const evs=detOf[tlCam]?await get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],since:a,until:b,limit:500})).catch(()=>[]):[];j={spans:timeline.spans,events:evs};cache.set(key,j);if(cache.size>30)cache.delete(cache.keys().next().value);}if(g!==generation||key!==windowKey)return;loadedCenter=center;spans=j.spans||{};events=withPinned(Array.isArray(j.events)?j.events:[]);drawTimeline();}catch(e){if(g===generation)$('tl-msg').textContent=e.message;}}
   // Events reached by a jump stay marked even when the cached window has not caught up with them.
@@ -340,8 +452,8 @@
   $('tl-calendar').addEventListener('click',()=>{const d=$('tl-date');d.value=localDate(new Date(center*1000));try{d.showPicker();}catch(e){d.focus();d.click();}});
   $('tl-date').addEventListener('change',async()=>{const t=+new Date($('tl-date').value+'T12:00:00')/1000;if(!Number.isFinite(t))return;const g=generation,[a,b]=dayBounds(t);try{const j=await get(CR+'/api/timeline?'+query(a,b));if(g!==generation)return;seekWall(j.spans.sub.length?j.spans.sub[0][0]:t);}catch(e){$('tl-msg').textContent=e.message;}});
   const timeInput=t=>new Date(t*1000).toTimeString().slice(0,8);
-  function syncRange(changed){rangeS=Math.round(rangeS);rangeE=Math.round(rangeE);if(changed==='start')rangeS=clamp(rangeS,rangeE-1800,rangeE-1);else rangeE=clamp(rangeE,rangeS+1,rangeS+1800);$('tl-start').value=timeInput(rangeS);$('tl-end').value=timeInput(rangeE);$('tl-start').title=fmt(rangeS);$('tl-end').title=fmt(rangeE);const duration=rangeE-rangeS;$('tl-duration').textContent=Math.floor(duration/60)+'m '+duration%60+'s';drawTimeline();clearTimeout(exportTimer);const seq=++exportSeq;$('tl-download').hidden=true;$('tl-export-msg').textContent='Estimating…';exportTimer=setTimeout(async()=>{try{const j=await get(CR+'/api/export/info?'+query(rangeS,rangeE));if(seq!==exportSeq||!selected)return;const q=j.recommended;$('tl-export-msg').textContent=j.busy?'Another export is running. Try again shortly.':q==='sub'?'Full-res is no longer kept.':!q?(stOf(j,'main')==='not_ready'||stOf(j,'sub')==='not_ready'?'Footage is not ready yet.':'No footage in this range.'):'';if(q&&!j.busy){const a=$('tl-download');a.href=CR+'/api/export?'+query(rangeS,rangeE,{quality:'main',fallback:1});a.textContent='Download '+(q==='main'?'full-res':'low-res')+' · '+Math.max(1,Math.round(j[q].bytes/1e6))+' MB';a.hidden=false;}}catch(e){if(seq===exportSeq)$('tl-export-msg').textContent=e.message;}},350);}
-  function rangeMode(on){selected=on;$('tl-range').hidden=!on;$('tl-select').setAttribute('aria-pressed',String(on));if(on){rangeS=center-60;rangeE=center+60;zoom=7;moved();syncRange();}else{clearTimeout(exportTimer);exportSeq++;drawTimeline();}}
+  function syncRange(changed){rangeS=Math.round(rangeS);rangeE=Math.round(rangeE);if(changed==='start')rangeS=clamp(rangeS,rangeE-1800,rangeE-1);else rangeE=clamp(rangeE,rangeS+1,rangeS+1800);$('tl-start').value=timeInput(rangeS);$('tl-end').value=timeInput(rangeE);$('tl-start').title=fmt(rangeS);$('tl-end').title=fmt(rangeE);const duration=rangeE-rangeS;$('tl-duration').textContent=Math.floor(duration/60)+'m '+duration%60+'s';drawTimeline();clearTimeout(exportTimer);const seq=++exportSeq;saveRelease(tlSave);$('tl-download').hidden=true;$('tl-export-msg').textContent='Estimating…';exportTimer=setTimeout(async()=>{try{const j=await get(CR+'/api/export/info?'+query(rangeS,rangeE));if(seq!==exportSeq||!selected)return;const q=j.recommended;$('tl-export-msg').textContent=j.busy?'Another export is running. Try again shortly.':q==='sub'?'Full-res is no longer kept.':!q?(stOf(j,'main')==='not_ready'||stOf(j,'sub')==='not_ready'?'Footage is not ready yet.':'No footage in this range.'):'';if(q&&!j.busy){saveArm(tlSave,{url:CR+'/api/export?'+query(rangeS,rangeE,{quality:'main',fallback:1}),filename:tlCam+'_'+fileStamp(rangeS)+'_export.mp4',type:'video/mp4',keepServerName:true,size:j[q].bytes});tlSave.link.textContent='Download '+(q==='main'?'full-res':'low-res')+' · '+Math.max(1,Math.round(j[q].bytes/1e6))+' MB';}}catch(e){if(seq===exportSeq)$('tl-export-msg').textContent=e.message;}},350);}
+  function rangeMode(on){selected=on;$('tl-range').hidden=!on;$('tl-select').setAttribute('aria-pressed',String(on));if(on){rangeS=center-60;rangeE=center+60;zoom=7;moved();syncRange();}else{clearTimeout(exportTimer);exportSeq++;saveRelease(tlSave);drawTimeline();}}
   $('tl-select').addEventListener('click',()=>rangeMode(!selected));$('tl-cancel').addEventListener('click',()=>rangeMode(false));
   for(const id of ['start','end'])$('tl-'+id).addEventListener('change',()=>{const current=id==='start'?rangeS:rangeE,d=new Date(current*1000),parts=$('tl-'+id).value.split(':').map(Number);if(parts.length<2)return;d.setHours(parts[0],parts[1],parts[2]||0,0);if(id==='start')rangeS=+d/1000;else rangeE=+d/1000;syncRange(id);});
   new ResizeObserver(()=>{if(tlCam)drawTimeline();}).observe(bar);
