@@ -54,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
         "resume_free_gb": 250,  # resume once free space is back above this
     },
     "clips": {"cache_dir": "", "max_cache_gb": 2, "max_age_s": 86400,
-              "timeout_s": 120, "timezone": "America/Chicago"},
+              "timeout_s": 120, "gap_tolerance_s": 2.0, "timezone": "America/Chicago"},
     "detection_protection": {"enabled": True, "interval_s": 60, "days": 14,
                              "lookback_s": 600, "pre_s": 5, "post_s": 5,
                              "fallback_s": 10, "max_window_s": 120},
@@ -90,6 +90,7 @@ DEFAULTS: dict[str, Any] = {
 ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "CLIP_CACHE_DIR": (("clips", "cache_dir"), str),
     "CLIP_CACHE_GB": (("clips", "max_cache_gb"), float),
+    "CLIP_GAP_TOLERANCE_S": (("clips", "gap_tolerance_s"), float),
     "CLIP_TIMEOUT_S": (("clips", "timeout_s"), float),
     "CLIP_TIMEZONE": (("clips", "timezone"), str),
     "DETECTION_PROTECTION_ENABLED": (("detection_protection", "enabled"), bool),
@@ -283,7 +284,7 @@ def validate(cfg: dict) -> dict:
     from zoneinfo import ZoneInfo
 
     ZoneInfo(cfg["clips"]["timezone"])
-    for section, keys in (("clips", ("max_cache_gb", "max_age_s", "timeout_s")),
+    for section, keys in (("clips", ("max_cache_gb", "max_age_s", "timeout_s", "gap_tolerance_s")),
                           ("detection_protection", ("interval_s", "days", "lookback_s", "fallback_s", "max_window_s"))):
         for key in keys:
             _positive(f"{section}.{key}", cfg[section][key])

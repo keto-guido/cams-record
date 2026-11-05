@@ -34,6 +34,7 @@ db:
   user: cams_record
   password_file: /run/secrets/db_password
 clips:
+  gap_tolerance_s: 2.0   # maximum gap when joining indexed segments
   cache_dir: ""          # default: recording.state_dir/clips, outside recording.root
   max_cache_gb: 2
   max_age_s: 86400

@@ -90,6 +90,7 @@ class Database:
             self.password = read_secret(cfg.get("password_file")) or ""
         self._conn = None
         self._lock = threading.RLock()
+        self.retention_lock = threading.RLock()
         self.ready = False
         self.connected = False
         self.last_error = ""
@@ -256,10 +257,11 @@ class Database:
         return self.run(q)
 
     def protect_window(self, camera: str, start: float, end: float, until: float) -> int:
-        return self.run(lambda cur: cur.execute("""UPDATE segments
-            SET protected_until=GREATEST(COALESCE(protected_until, %s), %s)
-            WHERE camera_id=%s AND start_ts < %s AND end_ts > %s AND deleted_at IS NULL""",
-            (to_dt(until), to_dt(until), camera, to_dt(end), to_dt(start))))
+        with self.retention_lock:
+            return self.run(lambda cur: cur.execute("""UPDATE segments
+                SET protected_until=GREATEST(COALESCE(protected_until, %s), %s)
+                WHERE camera_id=%s AND start_ts < %s AND end_ts > %s AND deleted_at IS NULL""",
+                (to_dt(until), to_dt(until), camera, to_dt(end), to_dt(start))))
 
     # -- retention ---------------------------------------------------------
     def oldest_segments(self, quality: str, end_before: float, limit: int, camera_id: str | None = None,

@@ -19,7 +19,7 @@ def seg(start=0, end=60, **kw):
 @pytest.mark.parametrize("rows,latest,start,end,state", [
     ([seg(), seg(60, 120)], 120, 10, 100, "available"),
     ([seg(), seg(50, 120)], 120, 10, 100, "available"),
-    ([seg(), seg(61, 120)], 120, 10, 100, "gone"),
+    ([seg(), seg(63, 120)], 120, 10, 100, "gone"),
     ([seg()], 60, 10, 80, "not_ready"),
     ([], None, 10, 80, "not_ready"),
     ([seg(deleted_at=True)], 60, 10, 50, "gone"),
@@ -214,3 +214,36 @@ def test_timeout_leaves_no_cached_output(setup, monkeypatch):
         clips.build("cam", "sub", 10, 40)
     assert error.value.status == 504
     assert not list(clips.cache.iterdir())
+
+
+@pytest.mark.parametrize("gap,tolerance,state", [
+    (0.06, 2, "available"), (0.4, 2, "available"), (2, 2, "available"),
+    (2.01, 2, "gone"), (0.4, 0.2, "gone"), (0.4, 0.5, "available"),
+])
+def test_gap_tolerance(gap, tolerance, state):
+    assert select_segments([seg(), seg(60 + gap, 120)], 120, 10, 100, tolerance)[0] == state
+
+
+def test_restart_duplicates_choose_furthest_chain():
+    rows = [seg(1, 60.970), seg(1.999, 61.969),
+            seg(61, 120.970), seg(61.999, 121.969)]
+    state, selected = select_segments(rows, 121.969, 10, 120)
+    assert state == "available"
+    assert selected == [rows[1], rows[3]]
+    cmd = ffmpeg_command("ffmpeg", "list", "out", selected, 10, 120)
+    assert float(cmd[cmd.index("-ss") + 1]) == 10 - rows[1]["start_ts"]
+
+
+def test_overlap_only_used_when_needed():
+    first, duplicate, next_row = seg(0, 60), seg(1, 60.5), seg(60.4, 120)
+    assert select_segments([first, duplicate, next_row], 120, 0, 100)[1] == [first, next_row]
+    assert select_segments([first, seg(50, 120)], 120, 0, 100)[1] == [first, seg(50, 120)]
+
+
+def test_availability_uses_configured_gap(setup):
+    cfg, db, _ = setup
+    db.clip_segments.return_value = ([seg(), seg(60.4, 120)], 120)
+    cfg["clips"]["gap_tolerance_s"] = 0.2
+    assert Clips(db, cfg).availability("cam", "sub", 10, 100)[0] == "gone"
+    cfg["clips"]["gap_tolerance_s"] = 0.5
+    assert Clips(db, cfg).availability("cam", "sub", 10, 100)[0] == "available"

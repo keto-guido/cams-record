@@ -704,3 +704,45 @@ def test_service_only_starts_the_janitor_with_a_database(tmp_path):
     svc.start()
     assert svc.janitor._thread is None
     svc.stop()
+
+
+def test_retention_does_not_hold_database_lock_during_unlink(env, monkeypatch):
+    import threading
+
+    from cams_record.db import Database
+
+    env.add(OLD)
+    env.store._lock = threading.RLock()
+    env.store.retention_lock = threading.RLock()
+    real_unlink = os.unlink
+
+    def unlink(path):
+        acquired = threading.Event()
+
+        def query():
+            with env.store._lock:
+                acquired.set()
+
+        worker = threading.Thread(target=query)
+        worker.start()
+        try:
+            assert acquired.wait(2), "filesystem I/O must not block DB queries"
+            # Protection and deletion still use the same separate lock.
+            probe = Database.__new__(Database)
+            probe.retention_lock = env.store.retention_lock
+            protected = threading.Event()
+            probe.run = lambda query: protected.set()
+            protector = threading.Thread(target=probe.protect_window, args=("cam", 0, 1, 2))
+            protector.start()
+            assert not protected.wait(0.05)
+            real_unlink(path)
+        finally:
+            worker.join(2)
+        threads.append((protector, protected))
+
+    threads = []
+    monkeypatch.setattr("cams_record.retention.os.unlink", unlink)
+    assert env.janitor().run_once()["segments"] == 1
+    for worker, protected in threads:
+        worker.join(2)
+        assert protected.is_set()

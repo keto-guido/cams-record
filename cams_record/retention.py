@@ -192,8 +192,8 @@ class Janitor:
             started = self.clock()
             t0 = time.monotonic()
             try:
-                # Serialize selection/unlink against detection protection updates.
-                with getattr(self.db, "_lock", nullcontext()):
+                # Serialize against protection without holding the shared DB lock during I/O.
+                with getattr(self.db, "retention_lock", nullcontext()):
                     result = self._pass(started)
             except DBUnavailable as exc:
                 log.warning("retention: pass abandoned, database unavailable: %s", exc)

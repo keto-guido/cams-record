@@ -44,21 +44,31 @@ def validate_window(start, end):
         raise ClipError(400, "clip window must be positive and at most 5 minutes")
 
 
-def select_segments(rows, latest, start, end):
+def select_segments(rows, latest, start, end, gap_tolerance_s=2.0):
     cursor = start
     selected = []
-    for row in rows:
-        if row.get("missing") or row.get("deleted_at") or row["end_ts"] <= cursor:
-            continue
-        if row["start_ts"] > cursor + 0.05:
-            return "gone", []
+    remaining = [r for r in rows if not r.get("missing") and not r.get("deleted_at")]
+    while cursor < end:
+        candidates = [r for r in remaining
+                      if r["start_ts"] <= cursor + gap_tolerance_s and r["end_ts"] > cursor]
+        if not candidates:
+            break
+        # The first row may contain the requested start. Later, avoid replaying a
+        # restart duplicate unless an overlapping row is the only way forward.
+        fresh = [r for r in candidates if r["start_ts"] >= cursor - gap_tolerance_s]
+        initial = [r for r in candidates if r["start_ts"] <= start]
+        row = max((fresh or candidates) if selected else (initial or candidates),
+                  key=lambda r: (r["end_ts"], r["start_ts"]))
         selected.append(row)
-        cursor = max(cursor, row["end_ts"])
-        if cursor >= end:
-            return "available", selected
+        cursor = row["end_ts"]
+        remaining = [r for r in remaining if r["end_ts"] > cursor]
+    if cursor >= end:
+        return "available", selected
+    if any(r["start_ts"] > cursor + gap_tolerance_s for r in remaining):
+        return "gone", []
     if latest is None or end > latest:
         # A known hole before the indexed frontier cannot be fixed by closing the live segment.
-        if cursor < min(end, latest or start) - 0.05:
+        if cursor < min(end, latest or start) - gap_tolerance_s:
             return "gone", []
         return "not_ready", []
     return "gone", []
@@ -91,7 +101,7 @@ class Clips:
         if self.db is None:
             raise ClipError(503, "segment index unavailable")
         rows, latest = self.db.clip_segments(camera, quality, start, end)
-        state, rows = select_segments(rows, latest, start, end)
+        state, rows = select_segments(rows, latest, start, end, self.cfg["gap_tolerance_s"])
         if state == "available":
             try:
                 for row in rows:
