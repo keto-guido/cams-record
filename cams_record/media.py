@@ -14,7 +14,7 @@ from .clips import ClipError, concat_listing, ffmpeg_command
 from .retention import UnsafePath, resolve_segment_path
 
 
-def playback_entries(rows, start, end):
+def playback_entries(rows, start, end, gap_tolerance_s=2.0):
     entries, paths, offset = [], set(), 0
     ordered = sorted(rows, key=lambda r: (r['start_ts'], -r['end_ts']))
     initial = [r for r in ordered if r['start_ts'] <= start < r['end_ts']
@@ -26,7 +26,9 @@ def playback_entries(rows, start, end):
         if (row.get('missing') or row.get('deleted_at') or row['path'] in paths
                 or row['end_ts'] <= start or row['start_ts'] >= end):
             continue
-        if entries and row['start_ts'] < entries[-1]['end']:
+        # Boundary jitter is normal; retain each file's full media duration.
+        if entries and (row['start_ts'] < entries[-1]['end'] - gap_tolerance_s
+                        or row['end_ts'] <= entries[-1]['end'] + 1e-6):
             continue
         duration = row['end_ts'] - row['start_ts']
         if duration <= 0:
@@ -44,7 +46,7 @@ def playlist(entries, tolerance):
              '#EXT-X-MEDIA-SEQUENCE:0']
     previous = None
     for e in entries:
-        if previous and (e['start'] - previous['end'] > tolerance
+        if previous and (abs(e['start'] - previous['end']) > tolerance
                          or e['codec'] != previous['codec']
                          or int(e['start'] // 86400) != int(previous['start'] // 86400)):
             lines.append('#EXT-X-DISCONTINUITY')

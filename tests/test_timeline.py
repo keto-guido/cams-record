@@ -61,6 +61,47 @@ def test_day_codec_discontinuity():
     assert playlist(entries, 2).count('#EXT-X-DISCONTINUITY') == 2
 
 
+@pytest.mark.parametrize('timestamps,tolerance', [
+    ([(1793849883.0, 1793849943.0),
+      (1793849941.999, 1793850001.999),
+      (1793850001.998, 1793850061.998)], 2.0),
+    ([(1793846425.0, 1793846466.133),
+      (1793846461.999, 1793846521.999),
+      (1793846521.998, 1793846581.998)], 5.0),
+])
+def test_playback_boundary_overlap(setup, timestamps, tolerance):
+    cfg, db, client = setup
+    cfg['clips']['gap_tolerance_s'] = tolerance
+    db.segment_rows.return_value = [seg(a, b) | {'id': i}
+                                    for i, (a, b) in enumerate(timestamps, 1)]
+    params = dict(cam='cam', start=timestamps[0][0], end=timestamps[-1][1])
+    response = client.get('/api/playback', params=params, headers=HEADERS)
+    assert response.status_code == 200
+    entries = response.json()['segments']
+    assert [e['id'] for e in entries] == [1, 2, 3]
+    durations = [b - a for a, b in timestamps]
+    assert [e['duration'] for e in entries] == pytest.approx(durations)
+    assert [e['offset'] for e in entries] == pytest.approx([0, durations[0], sum(durations[:2])])
+    assert all(a['end'] - b['start'] <= tolerance for a, b in zip(entries, entries[1:]))
+    response = client.get('/api/hls/cam/index.m3u8', params=params, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.text.count('#EXTINF:') == 3
+    assert '#EXT-X-DISCONTINUITY' not in response.text
+
+
+def test_playback_duplicates_and_overlap_limit():
+    source = [seg(1, 60.970), seg(1.999, 61.969),
+              seg(61, 120.970), seg(61.999, 121.969),
+              seg(120, 120.9700005), seg(120.5, 180), seg(121, 181)]
+    entries = playback_entries([r | {'id': i} for i, r in enumerate(source)], 10, 200)
+    assert [e['id'] for e in entries] == [1, 2, 5]
+    # A 4.134-second overlap exceeds the default tolerance.
+    entries = playback_entries([seg(1793846425.0, 1793846466.133) | {'id': 1},
+                                seg(1793846461.999, 1793846521.999) | {'id': 2}],
+                               1793846425.0, 1793846521.999)
+    assert [e['id'] for e in entries] == [1]
+
+
 @needs_ffmpeg
 def test_ts_cache_and_audio(setup, monkeypatch):
     cfg, db, client = setup

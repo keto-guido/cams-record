@@ -118,7 +118,8 @@ def create_app(service, cfg: dict):
 
     def playback_data(cam, camera, start, end):
         camera, start, end = range_window(cam, camera, start, end, 26 * 3600, True)
-        entries = playback_entries(indexed(camera, "sub", start, end), start, end)
+        entries = playback_entries(indexed(camera, "sub", start, end), start, end,
+                                   clips.cfg["gap_tolerance_s"])
         return camera, start, end, entries
 
     @r.get("/api/playback")
