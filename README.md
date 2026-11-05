@@ -477,3 +477,22 @@ GRANT SELECT ON cams_detect.events TO 'cams_record'@'127.0.0.1';
 
 No write grant on cams_detect is required. Check `SELECT CURRENT_USER()` when connecting
 as cams_record if MariaDB resolves the account to a different host (such as localhost).
+
+
+Segment file identity and upgrade (schema v4): segments are indexed by their relative
+`path` within the single indexer writer. Repeated CSV/reconcile/shutdown-sweep jobs
+refresh the earliest row for that path and preserve its original timestamps and
+protection. The shutdown sweep remembers only the last 16 listed paths; after a
+long run it can submit older files again with whole-second filename timestamps,
+where the live CSV used subsecond clock mapping. The former timestamp unique key
+allowed these to become duplicate rows.
+
+Migration v4 runs automatically on connect and only adds the non-unique
+`idx_segments_path_id (path, id)` lookup index using `IF NOT EXISTS`. It does not
+change or delete any rows or files, and does not require cleaning up existing
+duplicates. Index creation can briefly wait for metadata locks on a busy live DB.
+Existing duplicates remain safe: protection expands by path, retention rejects a
+path if any row (including a tombstone) protects it, deletion marks every row of
+the file, retention budgets count files once, and clip selection uses each path
+once. Run only one recorder/indexer writer per recording root/database; path
+deduplication is serialized in that writer, rather than enforced by a unique key.

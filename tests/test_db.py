@@ -48,7 +48,7 @@ def test_unique_camera_quality_start_upserts(db):
     db.insert_segment(row(size_bytes=999, dur=61))
     db.insert_segment(row(q="sub"))
     main = db.list_segments("front-door", "main")
-    assert len(main) == 1 and main[0]["size_bytes"] == 999 and main[0]["duration_ms"] == 61000
+    assert len(main) == 1 and main[0]["size_bytes"] == 999 and main[0]["duration_ms"] == 60000
     assert len(db.list_segments("front-door", "sub")) == 1
 
 
@@ -247,8 +247,75 @@ def test_migration_3_upgrades_v2(db):
     db.insert_segment(row())
     db.run(lambda c: c.execute("UPDATE segments SET protected=1"))
     db.run(lambda c: c.execute("ALTER TABLE segments DROP COLUMN protected_until"))
-    db.run(lambda c: c.execute("DELETE FROM schema_version WHERE version=3"))
+    db.run(lambda c: c.execute("DELETE FROM schema_version WHERE version>=3"))
     db.ready = False
-    assert db.ensure_schema() == 3
+    assert db.ensure_schema() == 4
     values = db.run(lambda c: (c.execute("SELECT protected, protected_until FROM segments"), c.fetchone())[1])
     assert values == (1, None)
+
+
+def legacy_duplicate(db):
+    db.insert_segment(row())
+    db.run(lambda c: c.execute("""INSERT INTO segments
+        (camera_id, quality, start_ts, end_ts, duration_ms, path, size_bytes)
+        SELECT camera_id, quality, start_ts + INTERVAL 999000 MICROSECOND,
+               end_ts + INTERVAL 999000 MICROSECOND, duration_ms, path, size_bytes FROM segments LIMIT 1"""))
+    return db.list_segments("front-door", "main")
+
+
+def test_reindex_same_path_with_different_clock(db):
+    db.insert_segment(row(start=T + .999))
+    db.insert_segment(row(start=T))  # reconcile or shutdown sweep
+    rows = db.list_segments("front-door", "main")
+    assert len(rows) == 1 and rows[0]["start_ts"] == T + .999
+
+
+def test_legacy_duplicates_protected_and_deleted_per_file(db):
+    import time
+
+    rows = legacy_duplicate(db)
+    assert db.segment_totals()[0]["bytes"] == 1234
+    assert db.segment_totals()[0]["segments"] == 1
+    # Only the later mapping overlaps this small window.
+    assert db.protect_window("front-door", T + 60.5, T + 60.8, time.time() + 86400) == 2
+    assert db.oldest_segments("main", T + 3600, 10) == []
+    db.run(lambda c: c.execute("UPDATE segments SET protected_until=NULL"))
+    # Even a protected tombstone must prevent unlinking its shared path.
+    db.run(lambda c: c.execute("UPDATE segments SET protected=1, deleted_at=NOW() WHERE id=%s", (rows[1]["id"],)))
+    assert db.oldest_segments("main", T + 3600, 10) == []
+    db.run(lambda c: c.execute("UPDATE segments SET protected=0, deleted_at=NULL"))
+    assert len(db.oldest_segments("main", T + 3600, 10)) == 1
+    assert db.mark_deleted([rows[0]["id"]]) == 2
+    assert db.list_segments("front-door", "main") == []
+    db.insert_segment(row())
+    assert len(db.list_segments("front-door", "main")) == 1
+
+
+def test_migration_4_preserves_legacy_duplicates(db):
+    from cams_record.db import MIGRATIONS
+
+    legacy_duplicate(db)
+    before = db.run(lambda c: (c.execute("SELECT * FROM segments ORDER BY id"), c.fetchall())[1])
+    for stmt in MIGRATIONS[-1][1]:
+        db.run(lambda c, stmt=stmt: c.execute(stmt))
+    after = db.run(lambda c: (c.execute("SELECT * FROM segments ORDER BY id"), c.fetchall())[1])
+    assert before == after
+
+
+def test_janitor_legacy_shared_file(db, tmp_path):
+    from cams_record.config import DEFAULTS
+    from cams_record.retention import Janitor
+
+    rows = legacy_duplicate(db)
+    path = tmp_path / rows[0]["path"]
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"video")
+    db.run(lambda c: c.execute("UPDATE segments SET protected=1 WHERE id=%s", (rows[1]["id"],)))
+    cfg = {**DEFAULTS["retention"], "dry_run": False, "main_days": 0}
+    janitor = Janitor(db, str(tmp_path), cfg, 60, clock=lambda: T + 3600)
+    assert janitor.run_once()["segments"] == 0
+    assert path.exists()
+    db.run(lambda c: c.execute("UPDATE segments SET protected=0"))
+    assert janitor.run_once()["segments"] == 1
+    assert not path.exists()
+    assert db.list_segments("front-door", "main") == []

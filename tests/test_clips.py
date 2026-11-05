@@ -13,7 +13,7 @@ from tests.test_web import SECRET, tok
 
 
 def seg(start=0, end=60, **kw):
-    return dict(start_ts=start, end_ts=end, path="a.mp4", codec="hevc", **kw)
+    return dict(start_ts=start, end_ts=end, path="a.mp4" if start == 0 else f"{start}.mp4", codec="hevc", **kw)
 
 
 @pytest.mark.parametrize("rows,latest,start,end,state", [
@@ -187,7 +187,7 @@ def test_real_ffmpeg_concat(setup, tmp_path):
     root = Path(cfg["recording"]["root"])
     make_clip(root / "a.mp4", 3)
     shutil.copy(root / "a.mp4", root / "b.mp4")
-    db.clip_segments.return_value = ([seg(100, 103) | {"codec": "h264"},
+    db.clip_segments.return_value = ([seg(100, 103) | {"path": "a.mp4", "codec": "h264"},
                                       seg(103, 106) | {"path": "b.mp4", "codec": "h264"}], 106)
     path = Clips(db, cfg).build("cam", "sub", 101, 105)
     result = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
@@ -243,7 +243,16 @@ def test_overlap_only_used_when_needed():
 def test_availability_uses_configured_gap(setup):
     cfg, db, _ = setup
     db.clip_segments.return_value = ([seg(), seg(60.4, 120)], 120)
+    (Path(cfg["recording"]["root"]) / "60.4.mp4").write_bytes(b"segment")
     cfg["clips"]["gap_tolerance_s"] = 0.2
     assert Clips(db, cfg).availability("cam", "sub", 10, 100)[0] == "gone"
     cfg["clips"]["gap_tolerance_s"] = 0.5
     assert Clips(db, cfg).availability("cam", "sub", 10, 100)[0] == "available"
+
+
+def test_selection_never_replays_same_file():
+    rows = [seg(0, 60), dict(seg(0.999, 60.999), path="a.mp4"), seg(60, 120)]
+    state, selected = select_segments(rows, 120, 10, 100)
+    assert state == "available"
+    assert [r["path"] for r in selected] == ["a.mp4", "60.mp4"]
+    assert select_segments(rows[:2], 60.999, 10, 60.5)[0] != "available"

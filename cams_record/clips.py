@@ -47,7 +47,11 @@ def validate_window(start, end):
 def select_segments(rows, latest, start, end, gap_tolerance_s=2.0):
     cursor = start
     selected = []
-    remaining = [r for r in rows if not r.get("missing") and not r.get("deleted_at")]
+    by_path = {}
+    for row in rows:
+        if not row.get("missing") and not row.get("deleted_at"):
+            by_path.setdefault(row["path"], row)
+    remaining = list(by_path.values())
     while cursor < end:
         candidates = [r for r in remaining
                       if r["start_ts"] <= cursor + gap_tolerance_s and r["end_ts"] > cursor]

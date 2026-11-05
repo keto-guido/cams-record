@@ -74,6 +74,7 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             ADD KEY IF NOT EXISTS idx_segments_retention (deleted_at, quality, start_ts)""",
     ]),
     (3, ["ALTER TABLE segments ADD COLUMN IF NOT EXISTS protected_until DATETIME NULL"]),
+    (4, ["ALTER TABLE segments ADD KEY IF NOT EXISTS idx_segments_path_id (path, id)"]),
 ]
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "schema_version")
@@ -188,13 +189,29 @@ class Database:
         params = (row["camera_id"], row["quality"], to_dt(row["start_ts"]), to_dt(row["end_ts"]),
                   int(row["duration_ms"]), row["path"], int(row["size_bytes"]), row.get("codec"),
                   row.get("width"), row.get("height"), row.get("fps"))
-        self.run(lambda cur: cur.execute(
-            """INSERT INTO segments (camera_id, quality, start_ts, end_ts, duration_ms, path, size_bytes,
-                                     codec, width, height, fps)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON DUPLICATE KEY UPDATE end_ts=VALUES(end_ts), duration_ms=VALUES(duration_ms),
-                 path=VALUES(path), size_bytes=VALUES(size_bytes), codec=VALUES(codec), width=VALUES(width),
-                 height=VALUES(height), fps=VALUES(fps), missing=0, deleted_at=NULL""", params))
+
+        def q(cur):
+            # CSV clock mapping and reconcile/sweep filename times can differ.
+            # run() holds the single writer's lock across lookup and write.
+            cur.execute("SELECT id FROM segments WHERE path=%s ORDER BY id LIMIT 1", (row["path"],))
+            existing = cur.fetchone()
+            if existing:
+                # Preserve the first mapping and protection; revive only the canonical row.
+                cur.execute("""UPDATE segments SET size_bytes=%s, codec=%s, width=%s, height=%s,
+                               fps=%s, missing=0, deleted_at=NULL WHERE id=%s""",
+                            (int(row["size_bytes"]), row.get("codec"), row.get("width"),
+                             row.get("height"), row.get("fps"), existing[0]))
+                return
+            cur.execute(
+                """INSERT INTO segments (camera_id, quality, start_ts, end_ts, duration_ms, path, size_bytes,
+                                         codec, width, height, fps)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE end_ts=VALUES(end_ts), duration_ms=VALUES(duration_ms),
+                     path=VALUES(path), size_bytes=VALUES(size_bytes), codec=VALUES(codec), width=VALUES(width),
+                     height=VALUES(height), fps=VALUES(fps), missing=0, deleted_at=NULL""", params)
+
+        with self.retention_lock:
+            self.run(q)
 
     def paths_with_prefix(self, prefix: str) -> set[str]:
         like = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -258,17 +275,22 @@ class Database:
 
     def protect_window(self, camera: str, start: float, end: float, until: float) -> int:
         with self.retention_lock:
-            return self.run(lambda cur: cur.execute("""UPDATE segments
-                SET protected_until=GREATEST(COALESCE(protected_until, %s), %s)
-                WHERE camera_id=%s AND start_ts < %s AND end_ts > %s AND deleted_at IS NULL""",
+            return self.run(lambda cur: cur.execute("""UPDATE segments AS target
+                JOIN segments AS overlap ON overlap.path=target.path
+                SET target.protected_until=GREATEST(COALESCE(target.protected_until, %s), %s)
+                WHERE overlap.camera_id=%s AND overlap.start_ts < %s AND overlap.end_ts > %s
+                """,
                 (to_dt(until), to_dt(until), camera, to_dt(end), to_dt(start))))
 
     # -- retention ---------------------------------------------------------
     def oldest_segments(self, quality: str, end_before: float, limit: int, camera_id: str | None = None,
                         start_before: float | None = None, present_only: bool = False) -> list[dict]:
         """Deletable segments, oldest first: never protected, never deleted, closed before ``end_before``."""
-        where = ["deleted_at IS NULL", "protected = 0",
-                 "(protected_until IS NULL OR protected_until <= UTC_TIMESTAMP())",
+        where = ["s.deleted_at IS NULL",
+                 "NOT EXISTS (SELECT 1 FROM segments p WHERE p.path=s.path "
+                 "AND (p.protected=1 OR p.protected_until > UTC_TIMESTAMP()))",
+                 "NOT EXISTS (SELECT 1 FROM segments earlier WHERE earlier.path=s.path "
+                 "AND earlier.deleted_at IS NULL AND earlier.id < s.id)",
                  "quality = %s", "end_ts < %s"]
         params: list = [quality, to_dt(end_before)]
         if camera_id is not None:
@@ -281,7 +303,7 @@ class Database:
             where.append("missing = 0")
 
         def q(cur):
-            cur.execute(f"""SELECT id, camera_id, quality, start_ts, path, size_bytes, missing FROM segments
+            cur.execute(f"""SELECT id, camera_id, quality, start_ts, path, size_bytes, missing FROM segments s
                             WHERE {" AND ".join(where)} ORDER BY start_ts, id LIMIT %s""", (*params, int(limit)))
             return cur.fetchall()
 
@@ -295,7 +317,13 @@ class Database:
                                   SUM(IF(missing = 0 AND (protected = 1 OR protected_until > UTC_TIMESTAMP()),
                                          size_bytes, 0)),
                                   MIN(IF(missing = 0, start_ts, NULL))
-                           FROM segments WHERE deleted_at IS NULL
+                           FROM (
+                               SELECT path, camera_id, quality, MIN(missing) AS missing,
+                                      MAX(size_bytes) AS size_bytes, MIN(start_ts) AS start_ts,
+                                      MAX(protected) AS protected, MAX(protected_until) AS protected_until
+                               FROM segments WHERE deleted_at IS NULL
+                               GROUP BY path, camera_id, quality
+                           ) files
                            GROUP BY camera_id, quality ORDER BY camera_id, quality""")
             return cur.fetchall()
 
@@ -303,7 +331,7 @@ class Database:
                  "protected_bytes": int(r[4]), "oldest_start_ts": from_dt(r[5])} for r in self.run(q)]
 
     def mark_deleted(self, ids: list[int]) -> int:
-        """Set deleted_at on these rows in one transaction, in id order."""
+        """Mark every row sharing a file with these ids deleted."""
         ids = sorted(ids)
         if not ids:
             return 0
@@ -312,8 +340,9 @@ class Database:
         def q(cur):
             self._conn.begin()
             try:
-                n = cur.execute(f"UPDATE segments SET deleted_at = NOW() WHERE id IN ({marks}) "
-                                "AND deleted_at IS NULL ORDER BY id", ids)
+                n = cur.execute(f"UPDATE segments target JOIN (SELECT path FROM segments WHERE id IN ({marks})) chosen "
+                                "ON chosen.path=target.path SET target.deleted_at=NOW() "
+                                "WHERE target.deleted_at IS NULL", ids)
                 self._conn.commit()
                 return n
             except Exception:
