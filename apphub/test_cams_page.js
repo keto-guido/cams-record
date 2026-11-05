@@ -20,6 +20,10 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=12'));
-assert(html.includes('cams.css?v=8'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=13'));
+assert(html.includes('cams.css?v=9'));
+assert(html.includes('id="tl-det-prev" aria-label="Previous detection"'));
+assert(html.includes('id="tl-det-next" aria-label="Next detection"'));
+assert(html.includes('>Prev event<') && html.includes('>Next event<'));
+assert(html.includes('id="cam-toast" hidden'));
 app.handle({method:'GET'}, {done:r=>{assert.equal(r.status,200);assert(r.type.startsWith('application/javascript'));assert.equal(r.headers['Cache-Control'],'private, max-age=86400');fs.rmSync(dir,{recursive:true});console.log('camera page tests passed');}}, {}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));

@@ -216,11 +216,12 @@
   let tlCam=null,generation=0,hls=null,data=null,mode='live',center=Date.now()/1000,zoom=3;
   let spans={},events=[],selected=false,rangeS=0,rangeE=0,exportTimer=null,exportSeq=0,pollTimer=null,followTimer=null,raf=0,loadTimer=null;
   let seekSequence=0,watchdog=0,gesture=null,windowKey='',playDay='',soundWanted=false,loadedCenter=0;
+  let pinned=[],jumpSeq=0,jumpHold=null,jumpPrior=null,toastTimer=0;
   const cache=new Map(),playCache=new Map(),pointers=new Map();
   const span=()=>levels[zoom], left=()=>center-span()/2;
   const query=(start,end,extra={})=>new URLSearchParams({cam:tlCam,start:Math.floor(start),end:Math.ceil(end),...extra});
-  const icons={back:'M10 8H4V2 M4 8a8 8 0 1 1-1 8 M9 12v6m3-6h3v6h-3z',forward:'M14 8h6V2 M20 8a8 8 0 1 0 1 8 M9 12v6m3-6h3v6h-3z',play:'m9 5 11 7-11 7z',pause:'M8 5v14M16 5v14','det-prev':'M6 5v14m13-14-10 7 10 7z','det-next':'M18 5v14M5 5l10 7-10 7z',out:'M5 12h14',in:'M5 12h14M12 5v14',calendar:'M4 6h16v15H4zM4 10h16M8 3v5M16 3v5',select:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',cancel:'m6 6 12 12M18 6 6 18'};
-  function icon(id,name=id){$('tl-'+id).innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'+icons[name]+'"/></svg>';}
+  const icons={back:'M10 8H4V2 M4 8a8 8 0 1 1-1 8 M9 12v6m3-6h3v6h-3z',forward:'M14 8h6V2 M20 8a8 8 0 1 0 1 8 M9 12v6m3-6h3v6h-3z',play:'m9 5 11 7-11 7z',pause:'M8 5v14M16 5v14','det-prev':'m8 6-6 6 6 6M21 12a5 5 0 1 1-10 0 5 5 0 1 1 10 0M16 12h.01','det-next':'m16 6 6 6-6 6M13 12a5 5 0 1 1-10 0 5 5 0 1 1 10 0M8 12h.01',out:'M5 12h14',in:'M5 12h14M12 5v14',calendar:'M4 6h16v15H4zM4 10h16M8 3v5M16 3v5',select:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',cancel:'m6 6 12 12M18 6 6 18'};
+  function icon(id,name=id){const b=$('tl-'+id),old=b.querySelector('svg');if(old)old.remove();b.insertAdjacentHTML('afterbegin','<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'+icons[name]+'"/></svg>');}
   Object.keys(icons).filter(k=>k!=='pause').forEach(k=>icon(k));
   function updatePill(){const live=mode==='live'&&!gesture;$('cam-mode').textContent=live?'LIVE':fmt(center);$('cam-mode').classList.toggle('live',live);$('cam-live').hidden=mode==='live';if(mode==='live')$('cam-unmute').hidden=true;icon('play',v.paused?'play':'pause');}
   function drawTimeline(){if(!raf)raf=requestAnimationFrame(paint);}
@@ -240,9 +241,11 @@
   function releasePlayback(){seekSequence++;if(hls)hls.destroy();hls=null;data=null;playDay='';v.onerror=null;v.onplaying=null;v.pause();v.removeAttribute('src');v.load();v.disableRemotePlayback=false;$('cam-retry').hidden=true;}
   function timelineStop(){generation++;tlCam=null;releasePlayback();clearTimeout(exportTimer);clearTimeout(loadTimer);clearInterval(pollTimer);clearInterval(followTimer);cancelAnimationFrame(raf);raf=0;exportSeq++;pointers.clear();gesture=null;cache.clear();playCache.clear();}
   async function refreshTimeline(force=false){if(!tlCam||!visible())return;const g=generation,a=Math.floor((center-span()*1.5)/3600)*3600,b=Math.ceil((center+span()*1.5)/3600)*3600,key=localDate(new Date(center*1000))+':'+a+':'+b;windowKey=key;
-    try{let j=cache.get(key);if(!j||force){const timeline=await get(CR+'/api/timeline?'+query(a,b));await cdReady;if(g!==generation)return;const evs=detOf[tlCam]?await get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],since:a,until:b,limit:500})).catch(()=>[]):[];j={spans:timeline.spans,events:evs};cache.set(key,j);if(cache.size>30)cache.delete(cache.keys().next().value);}if(g!==generation||key!==windowKey)return;loadedCenter=center;spans=j.spans||{};events=(Array.isArray(j.events)?j.events:[]).sort((a,b)=>a.start_ts-b.start_ts);drawTimeline();}catch(e){if(g===generation)$('tl-msg').textContent=e.message;}}
+    try{let j=cache.get(key);if(!j||force){const timeline=await get(CR+'/api/timeline?'+query(a,b));await cdReady;if(g!==generation)return;const evs=detOf[tlCam]?await get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],since:a,until:b,limit:500})).catch(()=>[]):[];j={spans:timeline.spans,events:evs};cache.set(key,j);if(cache.size>30)cache.delete(cache.keys().next().value);}if(g!==generation||key!==windowKey)return;loadedCenter=center;spans=j.spans||{};events=withPinned(Array.isArray(j.events)?j.events:[]);drawTimeline();}catch(e){if(g===generation)$('tl-msg').textContent=e.message;}}
+  // Events reached by a jump stay marked even when the cached window has not caught up with them.
+  function withPinned(list){const have=new Set(list.map(e=>e.id));return list.concat(pinned.filter(e=>!have.has(e.id))).sort((a,b)=>a.start_ts-b.start_ts);}
   function moved(){center=Math.min(center,Date.now()/1000);drawTimeline();clearTimeout(loadTimer);loadTimer=setTimeout(()=>refreshTimeline(),120);}
-  function timelineStart(id){timelineStop();tlCam=id;mode='live';center=Date.now()/1000;zoom=3;spans={};events=[];selected=false;$('tl-range').hidden=true;$('tl-select').setAttribute('aria-pressed','false');$('tl-date').max=localDate(new Date());$('tl-msg').textContent='';$('cam-unmute').hidden=true;refreshTimeline();drawTimeline();pollTimer=setInterval(()=>{if(visible()&&Math.abs(Date.now()/1000-center)<=span()/2){playCache.clear();refreshTimeline(true);}},60000);followTimer=setInterval(()=>{if(tlCam&&visible()&&mode==='live'&&!gesture){center=Date.now()/1000;drawTimeline();}},1000);}
+  function timelineStart(id){timelineStop();tlCam=id;mode='live';center=Date.now()/1000;zoom=3;spans={};events=[];pinned=[];jumpHold=null;selected=false;updateDetButtons();cdReady.then(updateDetButtons);$('tl-range').hidden=true;$('tl-select').setAttribute('aria-pressed','false');$('tl-date').max=localDate(new Date());$('tl-msg').textContent='';$('cam-unmute').hidden=true;refreshTimeline();drawTimeline();pollTimer=setInterval(()=>{if(visible()&&Math.abs(Date.now()/1000-center)<=span()/2){playCache.clear();refreshTimeline(true);}},60000);followTimer=setInterval(()=>{if(tlCam&&visible()&&mode==='live'&&!gesture){center=Date.now()/1000;drawTimeline();}},1000);}
   function enterPlayback(){if(mode==='live')liveStop();mode='playback';msg.textContent='';v.autoplay=false;}
   // Must run inside the tap: iOS only keeps sound for an element that was played during a user gesture.
   function primeSound(){soundWanted=true;v.muted=false;const p=v.play();if(p&&p.catch)p.catch(()=>{});}
@@ -289,7 +292,48 @@
   bar.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();seekWall(center+(e.key==='ArrowLeft'?-10:10));}else if(e.key==='+'||e.key==='-'){e.preventDefault();zoomAt(e.key==='+'?1:-1);}});
   $('tl-back').addEventListener('click',()=>seekWall(center-10));$('tl-forward').addEventListener('click',()=>seekWall(center+10));
   $('tl-play').addEventListener('click',()=>{if(mode==='live'||!data)seekWall(center);else if(v.paused)playSound(seekSequence);else v.pause();});
-  for(const [id,dir] of [['det-prev',-1],['det-next',1]])$('tl-'+id).addEventListener('click',()=>{const list=dir<0?[...events].reverse():events,e=list.find(e=>dir<0?e.start_ts<center-1:e.start_ts>center+6);if(e)seekWall(e.start_ts-5);});
+  // ---------- previous/next detection, across the camera's whole history ----------
+  const JUMP_PAGE=200;
+  function updateDetButtons(){const off=String(!detOf[tlCam]);$('tl-det-prev').setAttribute('aria-disabled',off);$('tl-det-next').setAttribute('aria-disabled',off);}
+  function toast(text){const el=$('cam-toast');el.textContent=text;el.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{el.hidden=true;},2000);}
+  const eventsPage=params=>get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],...params}));
+  async function findDetection(dir,t,stale){
+    if(dir<0)return (await eventsPage({before:t-1,limit:1}))[0]||null;
+    // Results are newest first, so a full page may stop short of the nearest event: walk back until a short page.
+    let best=null,until={};
+    for(;;){
+      const evs=await eventsPage({since:t+6,limit:JUMP_PAGE,...until});
+      if(stale())return null;
+      const low=evs.filter(e=>e.start_ts>t+5).reduce((m,e)=>!m||e.start_ts<m.start_ts?e:m,null),closer=low&&(!best||low.start_ts<best.start_ts);
+      if(closer)best=low;
+      if(evs.length<JUMP_PAGE||!closer)return best;
+      until={until:best.start_ts};
+    }
+  }
+  // A playlist fetched earlier today ends before anything recorded since; seekWall would clamp to its end.
+  function dropStalePlaylist(target){const key=localDate(new Date(target*1000)),list=(playDay===key&&data)||playCache.get(key),last=list&&list.segments[list.segments.length-1];if(last&&target>=last.end){playCache.delete(key);if(playDay===key)data=null;}}
+  async function jumpDetection(dir){
+    if(!detOf[tlCam])return;
+    const none=dir<0?'No earlier detection':'No later detection',live=mode==='live';
+    if(live&&dir>0)return toast(none);
+    // After landing past an event (it sits in a footage gap), search from the event so the jump can move on from it.
+    const t=live?Date.now()/1000:jumpHold&&Math.abs(center-jumpHold.landed)<30?jumpHold.want:center;
+    const g=generation,seen=seekSequence,seq=++jumpSeq,stale=()=>seq!==jumpSeq||g!==generation||seen!==seekSequence||!!gesture;
+    // The lookup outlives the tap, so sound must be primed now; undone if the jump ends up going nowhere.
+    if(!jumpPrior)jumpPrior={muted:v.muted,wanted:soundWanted,paused:v.paused};
+    primeSound();
+    const settle=keep=>{const was=jumpPrior;jumpPrior=null;if(!keep){v.muted=was.muted;soundWanted=was.wanted;if(was.paused)v.pause();}};
+    let e;
+    try{e=await findDetection(dir,t,stale);}catch(err){if(seq===jumpSeq){if(stale())jumpPrior=null;else{settle(false);toast('Detections unavailable');}}return;}
+    if(stale()){if(seq===jumpSeq)jumpPrior=null;return;}
+    if(!e){settle(false);toast(none);return;}
+    settle(true);
+    const want=e.start_ts-5;
+    pinned.push(e);events=withPinned(events);dropStalePlaylist(want);
+    await seekWall(want);
+    if(seq===jumpSeq)jumpHold=Math.abs(center-want)>1?{want,landed:center}:null;
+  }
+  $('tl-det-prev').addEventListener('click',()=>jumpDetection(-1));$('tl-det-next').addEventListener('click',()=>jumpDetection(1));
   $('tl-calendar').addEventListener('click',()=>{const d=$('tl-date');d.value=localDate(new Date(center*1000));try{d.showPicker();}catch(e){d.focus();d.click();}});
   $('tl-date').addEventListener('change',async()=>{const t=+new Date($('tl-date').value+'T12:00:00')/1000;if(!Number.isFinite(t))return;const g=generation,[a,b]=dayBounds(t);try{const j=await get(CR+'/api/timeline?'+query(a,b));if(g!==generation)return;seekWall(j.spans.sub.length?j.spans.sub[0][0]:t);}catch(e){$('tl-msg').textContent=e.message;}});
   const timeInput=t=>new Date(t*1000).toTimeString().slice(0,8);

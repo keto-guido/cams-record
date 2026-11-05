@@ -16,14 +16,17 @@ const base=':root{color-scheme:dark;--card:#202328;--line:#34383e;--acc:#a18af8;
 const placeholder='<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect width="1280" height="720" fill="#30343a"/><path d="M0 520 380 280 760 520 1060 340 1280 520V720H0" fill="#383e45"/><text x="640" y="350" text-anchor="middle" fill="#8c939d" font-family="sans-serif" font-size="28">Camera preview</text></svg>';
 const now=()=>Date.now()/1000;
 function spans(start,end,quality='sub'){const n=now(),min=n-(quality==='main'?3:2)*86400,max=n-65,out=[];for(let a=Math.floor(min/3600)*3600;a<max;a+=3600){const s=Math.max(a+((Math.floor(a/3600)%7===0)?420:0),min,start),e=Math.min(a+3540,max,end);if(e>s)out.push([s,e]);}return out;}
-function events(cam){const n=now();return Array.from({length:12},(_,i)=>({id:String(i+1),camera:cam||cameras[i%2].id,camera_name:cam==='back-door'?'Back Door':'Front Door',label:i%3?'person':'car',score:.91,start_ts:n-240-i*880,end_ts:n-230-i*880,has_snapshot:true}));}
+// 24 recent events plus a sparse older tail, so a jump can cross local days. Cameras alternate, as in the real feed.
+const booted=now(); // Fixed origin: an event keeps its id and time across requests, as jumps rely on.
+function events(){const n=booted;return Array.from({length:32},(_,i)=>{const start=n-240-i*440-Math.max(0,i-23)*20000;return{id:String(i+1),camera:cameras[i%2].id,camera_name:cameras[i%2].name,label:i%3?'person':'car',score:.91,start_ts:start,end_ts:start+10,has_snapshot:true};});}
+const epoch=v=>Number.isFinite(+v)?+v:Date.parse(v)/1000;
 const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://localhost'),p=u.pathname,q=u.searchParams;const json=j=>send(res,200,JSON.stringify(j),'application/json');
   if(p==='/')return res.writeHead(302,{Location:'/cams/'}),res.end();
   if(p==='/static/style.css')return send(res,200,base,'text/css');
   if(p.startsWith('/cams/api/snap/')||/\/snapshot.*\.jpg$/.test(p)||p.startsWith('/cams-detect/api/frame/'))return send(res,200,placeholder,'image/svg+xml');
   if(p.startsWith('/cams/api/stream/'))return send(res,404,'Preview has no live stream');
   if(p==='/cams-detect/api/cameras')return json(cameras.map(c=>({...c,stream:c.id,configured:true,enabled:true})));
-  if(p==='/cams-detect/api/events'){let evs=events(q.get('camera'));if(q.has('since'))evs=evs.filter(e=>e.start_ts>=+q.get('since'));if(q.has('until'))evs=evs.filter(e=>e.start_ts<+q.get('until'));if(q.has('before'))evs=evs.filter(e=>e.start_ts<+q.get('before'));return json(evs);}
+  if(p==='/cams-detect/api/events'){let evs=events();if(q.get('camera'))evs=evs.filter(e=>e.camera===q.get('camera'));if(q.has('since'))evs=evs.filter(e=>e.start_ts>=epoch(q.get('since')));if(q.has('until'))evs=evs.filter(e=>e.start_ts<epoch(q.get('until')));if(q.has('before'))evs=evs.filter(e=>e.start_ts<+q.get('before'));return json(evs.sort((a,b)=>b.start_ts-a.start_ts).slice(0,+(q.get('limit')||50)));}
   const start=+(q.get('start')||now()-86400),end=+(q.get('end')||now());
   if(p==='/cams-record/api/timeline')return json({spans:{sub:spans(start,end),main:spans(start,end,'main')}});
   if(p==='/cams-record/api/playback'){let offset=0,id=0;const segments=[];for(const [a,b] of spans(start,end))for(let s=a;s<b;s+=60){const e=Math.min(s+60,b),duration=e-s;segments.push({id:++id,start:s,end:e,duration,offset,codec:'h264'});offset+=duration;}return json({segments,playlist:'hls/'+(q.get('cam')||'front-door')+'/index.m3u8?'+q});}

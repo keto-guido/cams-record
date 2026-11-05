@@ -73,3 +73,10 @@ body.cd-lb-open{overflow:hidden}
 @media(max-width:359px){.tl-controls{flex-wrap:wrap;justify-content:center}#tl-out{margin-left:0}.tl-icon{flex-basis:44px}.cam-mode{font-size:10px}.tl-times{gap:6px}}
 .tl-controls>.tl-icon{flex:1 1 0;min-width:0;width:auto;padding:10px 6px}#tl-out{margin-left:0}#view-cam .cam-player{max-width:100%}#tl-bar{max-width:100%}
 @media(max-width:359px){.tl-controls>.tl-icon{flex:0 0 44px;width:44px}}
+.tl-controls>.tl-det{flex:0 0 56px;width:56px;flex-direction:column;gap:1px;padding:3px 0;border-radius:10px;color:var(--acc,#a58aff)}
+.tl-cap{font-size:10px;line-height:11px;color:var(--mut,#aaa);white-space:nowrap}
+.tl-det[aria-disabled=true]{opacity:.4;color:var(--mut,#aaa);cursor:default;background:transparent}
+.tl-zoom{display:flex;flex:2 1 0;min-width:0}.tl-zoom .tl-icon{flex:1 1 0;width:auto;padding:10px 6px}
+@media(max-width:480px){.tl-zoom{position:absolute;right:0;bottom:calc(100% + 20px);flex:none;background:rgba(0,0,0,.42);border-radius:0 10px 10px 0}.tl-zoom .tl-icon{flex:0 0 44px;width:44px;padding:0;border-radius:10px;color:#fff}.tl-zoom .tl-icon svg{width:16px;height:16px}}
+#cam-toast{position:absolute;left:50%;bottom:52px;transform:translateX(-50%);padding:7px 12px;border-radius:20px;background:rgba(0,0,0,.72);color:#fff;font:500 12px system-ui;white-space:nowrap;pointer-events:none}
+#cam-toast[hidden]{display:none}
