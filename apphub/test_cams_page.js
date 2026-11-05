@@ -13,6 +13,12 @@ const app = require('./cams')({esc:String, page:(title,body)=>'<head></head>'+bo
 Module._resolveFilename = original;
 app.handle({method:'GET'}, {done:r=>{assert.equal(r.status,200);html=r.body;}}, {user:'test',csrf:'csrf'}, '/cams/', new URL('http://localhost/cams/'));
 assert(html.includes('id="timeline"'));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=10'));
-assert(html.includes('cams.css?v=6'));
+assert(!html.includes('id="tl-video"'));
+assert(!html.includes('id="tl-fs"'));
+assert(html.includes('<canvas id="tl-bar"'));
+for (const id of ['back','play','forward','det-prev','det-next','out','in','calendar','select','cancel']) assert(html.includes('id="tl-'+id+'"'));
+for (const id of ['cam-video','cam-mode','cam-live','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
+assert(!/style=|<script>/.test(html));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=11'));
+assert(html.includes('cams.css?v=7'));
 app.handle({method:'GET'}, {done:r=>{assert.equal(r.status,200);assert(r.type.startsWith('application/javascript'));assert.equal(r.headers['Cache-Control'],'private, max-age=86400');fs.rmSync(dir,{recursive:true});console.log('camera page tests passed');}}, {}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));
