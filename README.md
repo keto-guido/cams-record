@@ -6,7 +6,8 @@ writes 60 s MP4 segments from go2rtc, indexes them in the NAS's **MariaDB** and 
 
 - One supervised `ffmpeg` per (camera, quality), reading go2rtc RTSP
   (`rtsp://127.0.0.1:8554/<stream>`, host network). It **stream-copies only** and never
-  transcodes. Audio is copied only when the source track is AAC.
+  transcodes. Audio is copied only when the source track is AAC, using `-copyinkf:a`
+  to preserve go2rtc RTSP AAC packets without keyframe flags; video still starts at a keyframe.
 - 60 s segments cut on the first keyframe after each clock minute (`-segment_atclocktime`).
 - A segment is indexed only after ffmpeg closes it (CSV `-segment_list`). The indexer then runs
   `ffprobe` (nice 10, one at a time) and inserts a row: duration, codec, size, resolution, fps.

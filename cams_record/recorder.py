@@ -55,6 +55,8 @@ def build_ffmpeg_cmd(url: str, pattern: str, list_path: str, segment_time: int, 
     if audio:
         cmd += ["-map", "0:a?"]
     cmd += ["-c", "copy"]
+    if audio:
+        cmd += ["-copyinkf:a"]
     if video_codec == "hevc":
         cmd += ["-tag:v", "hvc1"]  # Safari only plays HEVC in MP4 with the hvc1 tag (ffmpeg writes hev1)
     cmd += ["-f", "segment", "-segment_time", str(int(segment_time)),

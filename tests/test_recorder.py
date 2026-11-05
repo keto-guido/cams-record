@@ -25,7 +25,8 @@ def test_ffmpeg_cmd_rtsp_stream_copy():
     cmd = build_ffmpeg_cmd("rtsp://127.0.0.1:8554/front-door", "/r/%Y.mp4", "/s/l.csv", 60, audio=True)
     s = " ".join(cmd)
     assert "-rtsp_transport tcp" in s and "-i rtsp://127.0.0.1:8554/front-door" in s
-    assert "-map 0:v -map 0:a? -c copy -f segment -segment_time 60 -segment_atclocktime 1" in s
+    assert "-map 0:v -map 0:a? -c copy -copyinkf:a -f segment -segment_time 60 -segment_atclocktime 1" in s
+    assert "-copyinkf:a" in cmd
     assert "-reset_timestamps 1 -strftime 1 -segment_format mp4 -segment_format_options movflags=+faststart" in s
     assert "-segment_list /s/l.csv -segment_list_type csv" in s
     assert cmd[-1] == "/r/%Y.mp4"
@@ -54,6 +55,7 @@ def test_hevc_source_is_tagged_with_any_audio_setting(tmp_path, monkeypatch, aud
 def test_ffmpeg_cmd_no_audio_and_file_input():
     cmd = build_ffmpeg_cmd("/clips/a.mp4", "/r/x.mp4", "/s/l.csv", 10, audio=False)
     assert "0:a?" not in cmd
+    assert "-copyinkf:a" not in cmd
     assert cmd[cmd.index("-i") - 3:cmd.index("-i")] == ["-re", "-stream_loop", "-1"]
 
 
