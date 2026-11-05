@@ -33,7 +33,8 @@ def make_guard(gb):
 
 
 def rec_cfg(tmp_path, **kw):
-    cfg = deep_merge(DEFAULTS["recording"], {"root": str(tmp_path / "nvr"), "state_dir": str(tmp_path / "state"),
+    cfg = deep_merge(DEFAULTS["recording"], {"root": str(tmp_path / "nvr"),
+                                              "state_dir": str(tmp_path.parent / (tmp_path.name + "-state")),
                                              "audio": "off"})
     cfg.update(kw)
     return cfg
@@ -220,7 +221,8 @@ def test_backoff_ends_as_soon_as_the_guard_blocks(tmp_path):
 @pytest.fixture
 def service(tmp_path):
     cfg = deep_merge(DEFAULTS, {"auth": {"mode": "none"},
-                                "recording": {"root": str(tmp_path), "state_dir": str(tmp_path / "state"),
+                                "recording": {"root": str(tmp_path),
+                                              "state_dir": str(tmp_path.parent / (tmp_path.name + "-state")),
                                               "ffmpeg": "false", "audio": "off"}})
     cams = {"cam": resolve_camera("cam", {"main_stream": "/x.mp4", "sub_stream": "/y.mp4"})}
     return Service(cfg, cams, db=None), cfg

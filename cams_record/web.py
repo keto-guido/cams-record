@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from starlette.background import BackgroundTask
 
 from .auth import Authenticator, AuthError, Principal
+from .clips import ClipError, Clips, parse_time, validate_window
+from .config import CAMERA_ID_RE
+from .db import DBUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +47,50 @@ def create_app(service, cfg: dict):
         except AuthError as exc:
             raise HTTPException(exc.status, exc.detail) from exc
 
+    clips = Clips(service.db, cfg)
+
+    def clip_user(request: Request) -> Principal:
+        try:
+            return auth.authenticate(request.headers, ["admin", "cams"])
+        except AuthError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+
+    def window(camera, start, end):
+        if not CAMERA_ID_RE.fullmatch(camera):
+            raise ClipError(400, "invalid camera id")
+        start, end = parse_time(start), parse_time(end)
+        validate_window(start, end)
+        return start, end
+
     r = APIRouter()
+
+    @r.get("/api/clip/info")
+    def clip_info(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
+                  download: Literal["0", "1"] = "0", _: Principal = Depends(clip_user)):
+        start, end = window(camera, start, end)
+        return {q: clips.availability(camera, q, start, end)[0] for q in ("sub", "main")}
+
+    @r.get("/api/clip")
+    def clip(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
+             download: Literal["0", "1"] = "0", _: Principal = Depends(clip_user)):
+        start, end = window(camera, start, end)
+        path = clips.build(camera, quality, start, end, lease=True)
+        stamp = datetime.fromtimestamp(start, ZoneInfo(cfg["clips"]["timezone"])).strftime("%Y%m%d-%H%M%S")
+        return FileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{quality}.mp4",
+                            content_disposition_type="attachment" if download == "1" else "inline",
+                            background=BackgroundTask(path.unlink, missing_ok=True))
+
+    @app.exception_handler(ClipError)
+    async def clip_exc(request: Request, exc: ClipError):
+        payload = {"detail": exc.detail}
+        if exc.status == 425:
+            payload["retry_after"] = 10
+        return JSONResponse(payload, status_code=exc.status,
+                            headers={"Retry-After": "10"} if exc.status == 425 else None)
+
+    @app.exception_handler(DBUnavailable)
+    async def db_exc(request: Request, exc: DBUnavailable):
+        return JSONResponse({"detail": "segment index unavailable"}, status_code=503)
 
     @r.get("/healthz")
     def healthz():

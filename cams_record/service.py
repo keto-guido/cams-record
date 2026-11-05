@@ -12,6 +12,7 @@ from .config import CameraConfig, stream_url
 from .db import Database, DBUnavailable
 from .diskguard import CHECK_INTERVAL, LEVEL_OK, DiskGuard
 from .indexer import Indexer
+from .protection import DetectionProtection
 from .reconcile import reconcile
 from .recorder import StreamRecorder
 from .retention import Janitor
@@ -35,6 +36,7 @@ class Service:
                 rec = StreamRecorder(cam.id, quality, url, self.rec_cfg, self.indexer, self.guard)
                 self.recorders[rec.key] = rec
         self.janitor = Janitor(db, self.root, cfg["retention"], int(self.rec_cfg["segment_time"]))
+        self.protection = DetectionProtection(db, cfg["detection_protection"])
         self._guard_seen = LEVEL_OK
         self.started_at = time.time()
         self.reconcile_result: dict | None = None
@@ -45,6 +47,7 @@ class Service:
     def start(self, run_reconcile: bool = True) -> None:
         self.started_at = time.time()
         self.indexer.start()
+        self.protection.start()
         self.guard.check(startup=True)  # before any recorder starts: refuse them below the minimum
         for rec in self.recorders.values():
             rec.start()
@@ -93,6 +96,7 @@ class Service:
         self._stop.set()
         if self._guard_thread is not None:
             self._guard_thread.join(timeout=5)
+        self.protection.stop()
         self.janitor.stop()
         for rec in self.recorders.values():
             rec.stop()

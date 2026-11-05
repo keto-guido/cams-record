@@ -53,6 +53,11 @@ DEFAULTS: dict[str, Any] = {
         "min_free_gb": 200,  # below: stop main; below half of it: stop sub as well; 0 disables
         "resume_free_gb": 250,  # resume once free space is back above this
     },
+    "clips": {"cache_dir": "", "max_cache_gb": 2, "max_age_s": 86400,
+              "timeout_s": 120, "timezone": "America/Chicago"},
+    "detection_protection": {"enabled": True, "interval_s": 60, "days": 14,
+                             "lookback_s": 600, "pre_s": 5, "post_s": 5,
+                             "fallback_s": 10, "max_window_s": 120},
     "retention": {
         "main_days": 3,
         "sub_days": 14,
@@ -64,10 +69,11 @@ DEFAULTS: dict[str, Any] = {
         "nice": 19,  # janitor thread only
     },
     "auth": {
+        "app_id": "cams-record",
         "mode": "jwt",  # jwt | none
         "secret_file": "/run/secrets/apphub_jwt",
         "header": "x-apphub-token",
-        "roles": ["admin"],  # every /api/* route needs one of these roles
+        "roles": ["admin"],  # legacy setting; non-clip API routes always require admin
         "leeway_seconds": 30,
     },
     "db": {
@@ -82,6 +88,14 @@ DEFAULTS: dict[str, Any] = {
 
 # env var -> (path in config, type)
 ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
+    "CLIP_CACHE_DIR": (("clips", "cache_dir"), str),
+    "CLIP_CACHE_GB": (("clips", "max_cache_gb"), float),
+    "CLIP_TIMEOUT_S": (("clips", "timeout_s"), float),
+    "CLIP_TIMEZONE": (("clips", "timezone"), str),
+    "DETECTION_PROTECTION_ENABLED": (("detection_protection", "enabled"), bool),
+    "DETECTION_PROTECTION_INTERVAL_S": (("detection_protection", "interval_s"), float),
+    "DETECTION_PROTECTION_DAYS": (("detection_protection", "days"), float),
+    "AUTH_APP_ID": (("auth", "app_id"), str),
     "LOG_LEVEL": (("log_level",), str),
     "BASE_PATH": (("base_path",), str),
     "HTTP_HOST": (("http", "host"), str),
@@ -266,6 +280,18 @@ def validate(cfg: dict) -> dict:
         raise ValueError("recording.backoff_initial must be > 0 and <= backoff_max")
     if float(rec["min_free_gb"]) < 0 or float(rec["resume_free_gb"]) < float(rec["min_free_gb"]):
         raise ValueError("recording.min_free_gb must be >= 0 and <= resume_free_gb")
+    from zoneinfo import ZoneInfo
+
+    ZoneInfo(cfg["clips"]["timezone"])
+    for section, keys in (("clips", ("max_cache_gb", "max_age_s", "timeout_s")),
+                          ("detection_protection", ("interval_s", "days", "lookback_s", "fallback_s", "max_window_s"))):
+        for key in keys:
+            _positive(f"{section}.{key}", cfg[section][key])
+    for key in ("pre_s", "post_s"):
+        if cfg["detection_protection"][key] < 0:
+            raise ValueError(f"detection_protection.{key} must be >= 0")
+    if not isinstance(cfg["detection_protection"]["enabled"], bool):
+        raise ValueError("detection_protection.enabled must be true or false")
     _validate_retention(cfg["retention"])
     return cfg
 

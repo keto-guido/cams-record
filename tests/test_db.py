@@ -202,3 +202,53 @@ def test_reconcile_skips_files_newer_than_cutoff_and_renames_corrupt(db, tmp_pat
     assert not broken.exists() and broken.with_name(broken.name + ".bad").exists()
     assert live.exists()
     assert db.list_segments("cam", "sub") == []
+
+
+def test_detection_protection_expiry(db):
+    import time
+
+    now = time.time()
+    db.insert_segment(row(start=now - 1000, dur=60))
+    db.protect_window("front-door", now - 1001, now - 900, now + 86400)
+    assert db.oldest_segments("main", now, 10) == []
+    db.protect_window("front-door", now - 1001, now - 900, now + 100)
+    until = db.run(lambda c: (c.execute("SELECT protected_until FROM segments"), c.fetchone()[0])[1])
+    assert until > to_dt(now + 80000)
+    db.run(lambda c: c.execute("UPDATE segments SET protected_until=UTC_TIMESTAMP() - INTERVAL 1 SECOND"))
+    assert len(db.oldest_segments("main", now, 10)) == 1
+    db.run(lambda c: c.execute("UPDATE segments SET protected=1"))
+    assert db.oldest_segments("main", now, 10) == []
+
+
+def test_clip_query_overlaps_and_deleted_rows(db):
+    db.insert_segment(row(start=T, dur=60))
+    db.insert_segment(row(start=T + 60, dur=60))
+    db.insert_segment(row(start=T + 120, dur=60))
+    db.insert_segment(row(start=T, q="sub", dur=300))
+    rows, latest = db.clip_segments("front-door", "main", T + 60, T + 120)
+    assert latest == T + 180
+    assert len(rows) == 1 and rows[0]["start_ts"] == T + 60
+    ids = db.list_segments("front-door", "main")
+    db.mark_deleted([ids[1]["id"]])
+    rows, _ = db.clip_segments("front-door", "main", T + 60, T + 120)
+    assert rows[0]["deleted_at"] is not None
+
+
+def test_protection_updates_both_qualities_only_overlaps(db):
+    for quality in ("main", "sub"):
+        db.insert_segment(row(start=T, q=quality))
+        db.insert_segment(row(start=T + 60, q=quality))
+    assert db.protect_window("front-door", T + 1, T + 60, T + 86400) == 2
+    rows = db.run(lambda c: (c.execute("SELECT start_ts, protected_until FROM segments"), c.fetchall())[1])
+    assert all((until is not None) == (start == to_dt(T)) for start, until in rows)
+
+
+def test_migration_3_upgrades_v2(db):
+    db.insert_segment(row())
+    db.run(lambda c: c.execute("UPDATE segments SET protected=1"))
+    db.run(lambda c: c.execute("ALTER TABLE segments DROP COLUMN protected_until"))
+    db.run(lambda c: c.execute("DELETE FROM schema_version WHERE version=3"))
+    db.ready = False
+    assert db.ensure_schema() == 3
+    values = db.run(lambda c: (c.execute("SELECT protected, protected_until FROM segments"), c.fetchone())[1])
+    assert values == (1, None)

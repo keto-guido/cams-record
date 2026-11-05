@@ -16,7 +16,8 @@ def client(tmp_path):
     sf = tmp_path / "apphub_jwt"
     sf.write_text(SECRET + "\n")
     cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(sf)},
-                                "recording": {"root": str(tmp_path), "state_dir": str(tmp_path / "state")}})
+                                "recording": {"root": str(tmp_path),
+                                              "state_dir": str(tmp_path.parent / (tmp_path.name + "-state"))}})
     from cams_record.config import resolve_camera
 
     cams = {"front-door": resolve_camera("front-door", {"main_stream": "front-door", "sub_stream": "fd-sub"})}
@@ -25,7 +26,8 @@ def client(tmp_path):
 
 
 def tok(roles=("admin",), exp=60, secret=SECRET):
-    return jwt.encode({"sub": "eric", "roles": list(roles), "exp": int(time.time()) + exp}, secret, "HS256")
+    return jwt.encode({"aud": "cams-record", "sub": "eric", "roles": list(roles), "exp": int(time.time()) + exp},
+                      secret, "HS256")
 
 
 def test_healthz_no_auth(client):

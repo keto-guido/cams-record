@@ -27,6 +27,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 
 from .config import QUALITIES
 from .db import Database, DBUnavailable
@@ -191,7 +192,9 @@ class Janitor:
             started = self.clock()
             t0 = time.monotonic()
             try:
-                result = self._pass(started)
+                # Serialize selection/unlink against detection protection updates.
+                with getattr(self.db, "_lock", nullcontext()):
+                    result = self._pass(started)
             except DBUnavailable as exc:
                 log.warning("retention: pass abandoned, database unavailable: %s", exc)
                 result = self._failed(str(exc))

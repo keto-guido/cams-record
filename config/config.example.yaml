@@ -26,10 +26,25 @@ retention:
 auth:
   mode: jwt              # jwt | none (none only for local testing)
   secret_file: /run/secrets/apphub_jwt
-  roles: [admin]
+  app_id: cams-record    # required JWT audience
 db:
   host: 127.0.0.1        # the NAS's MariaDB 10 (host networking)
   port: 3306
   database: cams_record
   user: cams_record
   password_file: /run/secrets/db_password
+clips:
+  cache_dir: ""          # default: recording.state_dir/clips, outside recording.root
+  max_cache_gb: 2
+  max_age_s: 86400
+  timeout_s: 120
+  timezone: America/Chicago
+detection_protection:
+  enabled: true
+  interval_s: 60
+  days: 14
+  lookback_s: 600
+  pre_s: 5
+  post_s: 5
+  fallback_s: 10
+  max_window_s: 120

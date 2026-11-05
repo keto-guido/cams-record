@@ -73,6 +73,7 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             ADD COLUMN IF NOT EXISTS deleted_at DATETIME NULL,
             ADD KEY IF NOT EXISTS idx_segments_retention (deleted_at, quality, start_ts)""",
     ]),
+    (3, ["ALTER TABLE segments ADD COLUMN IF NOT EXISTS protected_until DATETIME NULL"]),
 ]
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "schema_version")
@@ -233,11 +234,40 @@ class Database:
                  "fps": float(r[9]) if r[9] is not None else None, "missing": bool(r[10])}
                 for r in self.run(q)]
 
+    def clip_segments(self, camera: str, quality: str, start: float, end: float) -> tuple[list[dict], float | None]:
+        def q(cur):
+            cur.execute("SELECT MAX(end_ts) FROM segments WHERE camera_id=%s AND quality=%s",
+                        (camera, quality))
+            latest = from_dt(cur.fetchone()[0])
+            cur.execute("""SELECT start_ts, end_ts, path, codec, missing, deleted_at FROM segments
+                           WHERE camera_id=%s AND quality=%s AND start_ts < %s AND end_ts > %s
+                           ORDER BY start_ts""", (camera, quality, to_dt(end), to_dt(start)))
+            rows = [{"start_ts": from_dt(r[0]), "end_ts": from_dt(r[1]), "path": r[2],
+                     "codec": r[3], "missing": bool(r[4]), "deleted_at": r[5]} for r in cur.fetchall()]
+            return rows, latest
+        return self.run(q)
+
+    def detection_events(self, since: float) -> list[dict]:
+        def q(cur):
+            cur.execute("""SELECT camera_id, start_ts, end_ts FROM cams_detect.events
+                           WHERE updated_at >= %s OR start_ts >= %s""", (to_dt(since), to_dt(since)))
+            return [{"camera_id": r[0], "start_ts": from_dt(r[1]), "end_ts": from_dt(r[2])}
+                    for r in cur.fetchall()]
+        return self.run(q)
+
+    def protect_window(self, camera: str, start: float, end: float, until: float) -> int:
+        return self.run(lambda cur: cur.execute("""UPDATE segments
+            SET protected_until=GREATEST(COALESCE(protected_until, %s), %s)
+            WHERE camera_id=%s AND start_ts < %s AND end_ts > %s AND deleted_at IS NULL""",
+            (to_dt(until), to_dt(until), camera, to_dt(end), to_dt(start))))
+
     # -- retention ---------------------------------------------------------
     def oldest_segments(self, quality: str, end_before: float, limit: int, camera_id: str | None = None,
                         start_before: float | None = None, present_only: bool = False) -> list[dict]:
         """Deletable segments, oldest first: never protected, never deleted, closed before ``end_before``."""
-        where = ["deleted_at IS NULL", "protected = 0", "quality = %s", "end_ts < %s"]
+        where = ["deleted_at IS NULL", "protected = 0",
+                 "(protected_until IS NULL OR protected_until <= UTC_TIMESTAMP())",
+                 "quality = %s", "end_ts < %s"]
         params: list = [quality, to_dt(end_before)]
         if camera_id is not None:
             where.append("camera_id = %s")
@@ -260,7 +290,8 @@ class Database:
         """Per (camera, quality): non-deleted rows; segment and byte counts cover files on disk only."""
         def q(cur):
             cur.execute("""SELECT camera_id, quality, SUM(missing = 0), SUM(IF(missing = 0, size_bytes, 0)),
-                                  SUM(IF(missing = 0 AND protected = 1, size_bytes, 0)),
+                                  SUM(IF(missing = 0 AND (protected = 1 OR protected_until > UTC_TIMESTAMP()),
+                                         size_bytes, 0)),
                                   MIN(IF(missing = 0, start_ts, NULL))
                            FROM segments WHERE deleted_at IS NULL
                            GROUP BY camera_id, quality ORDER BY camera_id, quality""")

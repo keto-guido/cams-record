@@ -11,3 +11,5 @@ config/*.yaml
 !config/*.example.yaml
 *.mp4
 *.mkv
+
+.venv

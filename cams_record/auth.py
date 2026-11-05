@@ -1,7 +1,7 @@
 """App Hub JWT auth (HS256), same verification as cams-detect.
 
 Only the ``x-apphub-token`` header is trusted: the App Hub reverse proxy injects its per-app JWT
-there (and strips client-sent copies). Every /api route requires one of ``auth.roles`` (admin).
+there (and strips client-sent copies). Clip routes accept admin or cams; other /api routes require admin.
 """
 
 from __future__ import annotations
@@ -47,14 +47,15 @@ class Authenticator:
             self._secret_read = time.monotonic()
         return self._secret
 
-    def verify_token(self, token: str) -> Principal:
+    def verify_token(self, token: str, allowed_roles=None) -> Principal:
         secret = self.secret()
         if not secret:
             log.error("auth: JWT secret file %s missing or empty", self.cfg.get("secret_file"))
             raise AuthError(503, "auth not configured")
         try:
             claims = jwt.decode(token, secret, algorithms=["HS256"], leeway=self.leeway,
-                                options={"require": ["exp"], "verify_aud": False})
+                                audience=self.cfg.get("app_id", "cams-record"),
+                                options={"require": ["exp", "aud"]})
         except jwt.ExpiredSignatureError as exc:
             raise AuthError(401, "token expired") from exc
         except jwt.InvalidTokenError as exc:
@@ -65,14 +66,14 @@ class Authenticator:
         if not isinstance(roles, list):
             roles = []
         roles = [str(r) for r in roles]
-        if not self.roles & set(roles):
-            raise AuthError(403, "admin role required")
+        if not set(allowed_roles or ["admin"]) & set(roles):
+            raise AuthError(403, "required role missing")
         return Principal(sub=str(claims.get("sub") or claims.get("username") or "?"), roles=roles)
 
-    def authenticate(self, headers) -> Principal:
+    def authenticate(self, headers, allowed_roles=None) -> Principal:
         if self.mode == "none":
             return Principal(sub="anonymous", roles=["admin"])
         token = (headers.get(self.header) or "").strip()
         if not token:
             raise AuthError(401, "authentication required")
-        return self.verify_token(token)
+        return self.verify_token(token, allowed_roles)

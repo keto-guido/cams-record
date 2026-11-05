@@ -181,7 +181,7 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | table | purpose |
 |---|---|
 | `recorder_cameras` | camera config mirror: `id` (= `cams_detect.cameras.camera_id`), streams, flags |
-| `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing, protected, deleted_at` |
+| `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing, protected, protected_until, deleted_at` |
 | `recorder_status` | per (camera, quality): `state, last_segment_ts, restarts_24h, last_error` |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
@@ -259,7 +259,7 @@ makes reconcile lookups cheap, and the last one serves the janitor. Queries of y
    sudo docker compose logs -f cams-record
    ```
 
-   You should see `mariadb: applied schema migration v1` (and `v2`),
+   You should see `mariadb: applied schema migration v1` (and `v2`, `v3`),
    `front-door/main: recording rtsp://127.0.0.1:8554/front-door-main …` and, after about a minute,
    rows in `segments`.
 
@@ -379,8 +379,8 @@ These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is
 | `skipped_total`, `errors_total` | rows refused by the path checks, failed passes |
 
 Auth trusts only the `x-apphub-token` header. The value must be an HS256 JWT signed with the
-App Hub secret (`/run/secrets/apphub_jwt`), with `exp` set and a `roles` claim that contains
-`admin`. The verification is the same as in cams-detect.
+App Hub secret (`/run/secrets/apphub_jwt`), with `exp` set, `aud: cams-record`, and a `roles` claim containing
+`admin` (clip endpoints also accept `cams`).
 
 ```bash
 curl -s -H "x-apphub-token: $TOKEN" http://127.0.0.1:8097/cams-record/api/status | jq
@@ -414,3 +414,66 @@ python -m pytest -q -m integration
   `CAMS_TEST_SEGMENT_TIME=6` for a 25 s local run.
 - CI (GitHub Actions) has three jobs: ruff, tests (unit and integration against MariaDB), and a
   `DOCKER_BUILDKIT=0` image build with a smoke test.
+
+## Detection clips and footage protection
+
+`GET /cams-record/api/clip?camera=front-door&start=2026-11-04T21:32:00Z&end=2026-11-04T21:33:00Z&quality=sub&download=0`
+returns an inline MP4; `download=1` sends an attachment. Timestamps accept epoch seconds or
+ISO8601 with a timezone (encode a literal `+` as `%2B`). Windows must be positive and at most
+five minutes. HTTP Range requests return 206. Download names use America/Chicago by default.
+`GET /api/clip/info` accepts the same query and returns, for example,
+`{"sub":"available","main":"gone"}`. Both prefixed and proxy-stripped paths work.
+
+These two endpoints accept `admin` **or** `cams`; status and metrics remain admin-only.
+JWTs must have `exp` and `aud: cams-record` (override with `auth.app_id` / `AUTH_APP_ID`).
+Only the App Hub injected `x-apphub-token` header is trusted.
+A 425 response includes `detail`, `retry_after` (seconds), and `Retry-After`: retry once the
+recorder closes and indexes the live segment. A 404 means a gap or deleted/missing footage,
+with a quality-specific message such as `main quality footage no longer available`.
+Stream copy preserves the source codecs, tags HEVC as `hvc1`, and retries without audio if
+copying audio fails. Keyframe boundaries can affect exact clip start time.
+
+Cache files are atomically published under `recording.state_dir/clips` by default
+(`/tmp/cams-record/clips`), never under the recordings root. Requests prune old files and
+evict least recently used files over the size budget. In-flight responses hold a temporary
+hard link until streaming finishes. Two ffmpeg builds can run at once, with a timeout per
+attempt; `nice -n 10` and `ionice -c3` are used when installed.
+
+| Config key | Default | Environment override |
+| --- | --- | --- |
+| `clips.cache_dir` | empty = state_dir/clips | `CLIP_CACHE_DIR` |
+| `clips.max_cache_gb` | 2 (decimal GB) | `CLIP_CACHE_GB` |
+| `clips.max_age_s` | 86400 | YAML only |
+| `clips.timeout_s` | 120 per attempt | `CLIP_TIMEOUT_S` |
+| `clips.timezone` | America/Chicago | `CLIP_TIMEZONE` |
+| `detection_protection.enabled` | true | `DETECTION_PROTECTION_ENABLED` |
+| `detection_protection.interval_s` | 60 | `DETECTION_PROTECTION_INTERVAL_S` |
+| `detection_protection.days` | 14 | `DETECTION_PROTECTION_DAYS` |
+| `detection_protection.lookback_s` | 600 | YAML only |
+| `detection_protection.pre_s`, `post_s` | 5 each | YAML only |
+| `detection_protection.fallback_s` | 10 | YAML only |
+| `detection_protection.max_window_s` | 120 | YAML only |
+
+Automatic migration **v3** adds nullable `segments.protected_until DATETIME` (UTC).
+Retention skips permanent manual `protected=1` rows and rows with an unexpired
+`protected_until`; expired temporary protection becomes deletable again. Protected-byte
+metrics include both kinds. The poller reads `cams_detect.events` using its exact MariaDB
+columns `camera_id`, `start_ts`, `end_ts`, `updated_at`. A successful-poll watermark plus a
+10-minute overlap catches updated end times and newly indexed segments. On restart it
+processes recent events, rather than scanning the full history. Poll failures log a warning
+and do not interrupt recording or retention.
+
+`cams_record.protection.event_window` computes start minus 5 seconds through event end
+plus 5 seconds; an open event uses start plus 10 seconds as its provisional end. The
+result is capped at 120 seconds. Both qualities overlapping that window receive
+`protected_until = max(existing, poll_time + 14 days)`.
+
+The compose file uses host networking, DB host `127.0.0.1`, and user `cams_record`.
+Run this as a MariaDB administrator (adjust user/host if your installation differs):
+
+```sql
+GRANT SELECT ON cams_detect.events TO 'cams_record'@'127.0.0.1';
+```
+
+No write grant on cams_detect is required. Check `SELECT CURRENT_USER()` when connecting
+as cams_record if MariaDB resolves the account to a different host (such as localhost).
