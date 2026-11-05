@@ -216,7 +216,7 @@
   let tlCam=null,generation=0,hls=null,data=null,mode='live',center=Date.now()/1000,zoom=3;
   let spans={},events=[],selected=false,rangeS=0,rangeE=0,exportTimer=null,exportSeq=0,pollTimer=null,followTimer=null,raf=0,loadTimer=null;
   let seekSequence=0,watchdog=0,gesture=null,windowKey='',playDay='',soundWanted=false,loadedCenter=0;
-  let pinned=[],jumpSeq=0,jumpHold=null,jumpPrior=null,toastTimer=0;
+  let pinned=[],jumpSeq=0,jumpHold=null,lastJumped=null,jumpPrior=null,toastTimer=0;
   const cache=new Map(),playCache=new Map(),pointers=new Map();
   const span=()=>levels[zoom], left=()=>center-span()/2;
   const query=(start,end,extra={})=>new URLSearchParams({cam:tlCam,start:Math.floor(start),end:Math.ceil(end),...extra});
@@ -245,7 +245,7 @@
   // Events reached by a jump stay marked even when the cached window has not caught up with them.
   function withPinned(list){const have=new Set(list.map(e=>e.id));return list.concat(pinned.filter(e=>!have.has(e.id))).sort((a,b)=>a.start_ts-b.start_ts);}
   function moved(){center=Math.min(center,Date.now()/1000);drawTimeline();clearTimeout(loadTimer);loadTimer=setTimeout(()=>refreshTimeline(),120);}
-  function timelineStart(id){timelineStop();tlCam=id;mode='live';center=Date.now()/1000;zoom=3;spans={};events=[];pinned=[];jumpHold=null;selected=false;updateDetButtons();cdReady.then(updateDetButtons);$('tl-range').hidden=true;$('tl-select').setAttribute('aria-pressed','false');$('tl-date').max=localDate(new Date());$('tl-msg').textContent='';$('cam-unmute').hidden=true;refreshTimeline();drawTimeline();pollTimer=setInterval(()=>{if(visible()&&Math.abs(Date.now()/1000-center)<=span()/2){playCache.clear();refreshTimeline(true);}},60000);followTimer=setInterval(()=>{if(tlCam&&visible()&&mode==='live'&&!gesture){center=Date.now()/1000;drawTimeline();}},1000);}
+  function timelineStart(id){timelineStop();tlCam=id;mode='live';center=Date.now()/1000;zoom=3;spans={};events=[];pinned=[];jumpHold=null;lastJumped=null;selected=false;updateDetButtons();cdReady.then(updateDetButtons);$('tl-range').hidden=true;$('tl-select').setAttribute('aria-pressed','false');$('tl-date').max=localDate(new Date());$('tl-msg').textContent='';$('cam-unmute').hidden=true;refreshTimeline();drawTimeline();pollTimer=setInterval(()=>{if(visible()&&Math.abs(Date.now()/1000-center)<=span()/2){playCache.clear();refreshTimeline(true);}},60000);followTimer=setInterval(()=>{if(tlCam&&visible()&&mode==='live'&&!gesture){center=Date.now()/1000;drawTimeline();}},1000);}
   function enterPlayback(){if(mode==='live')liveStop();mode='playback';msg.textContent='';v.autoplay=false;}
   // Must run inside the tap: iOS only keeps sound for an element that was played during a user gesture.
   function primeSound(){soundWanted=true;v.muted=false;const p=v.play();if(p&&p.catch)p.catch(()=>{});}
@@ -297,8 +297,10 @@
   function updateDetButtons(){const off=String(!detOf[tlCam]);$('tl-det-prev').setAttribute('aria-disabled',off);$('tl-det-next').setAttribute('aria-disabled',off);}
   function toast(text){const el=$('cam-toast');el.textContent=text;el.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{el.hidden=true;},2000);}
   const eventsPage=params=>get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],...params}));
+  // A jump lands 5 s ahead of its event: while that event is still playing, previous must search from before it.
+  function previousBefore(t){const j=lastJumped,played=j?t-(j.start_ts-5):-1;return played>=0&&played<=30?Math.min(t-1,j.start_ts-0.5):t-6;}
   async function findDetection(dir,t,stale){
-    if(dir<0)return (await eventsPage({before:t-1,limit:1}))[0]||null;
+    if(dir<0)return (await eventsPage({before:previousBefore(t),limit:1}))[0]||null;
     // Results are newest first, so a full page may stop short of the nearest event: walk back until a short page.
     let best=null,until={};
     for(;;){
@@ -329,6 +331,7 @@
     if(!e){settle(false);toast(none);return;}
     settle(true);
     const want=e.start_ts-5;
+    lastJumped={id:e.id,start_ts:e.start_ts};
     pinned.push(e);events=withPinned(events);dropStalePlaylist(want);
     await seekWall(want);
     if(seq===jumpSeq)jumpHold=Math.abs(center-want)>1?{want,landed:center}:null;
