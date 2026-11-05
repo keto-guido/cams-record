@@ -71,7 +71,7 @@
 
   // ---------- detection clip player (modal) ----------
   // Plays a low-res (sub) clip from cams-record around the detection; downloads use full-res (main) when still kept.
-  const CR = '/cams-record', PRE = 5, POST = 5, NOEND = 10, MAXWIN = 120, CLIP_RETRY = 15000;
+  const CR = '/cams-record', STALL_MS = 12000, PRE = 5, POST = 5, NOEND = 10, MAXWIN = 120, CLIP_RETRY = 15000;
   const lb = $('cd-lb'), lbV = lb.querySelector('video'), lbImg = lb.querySelector('img'), lbInfo = lb.querySelector('.cd-lb-info'),
     lbMsg = lb.querySelector('.cd-lb-msg'), lbSnap = lb.querySelector('.cd-dl-snap'), lbClip = lb.querySelector('.cd-dl-clip'), lbNote = lb.querySelector('.cd-lb-note');
   let lbEv = null, lbTimer = null;
@@ -193,7 +193,7 @@
     const ua = navigator.userAgent, desk = /(Chrome|Firefox|Edg)\//.test(ua) && !/iPhone|iPad|iPod/.test(ua);
     const srcs = (!desk && v.canPlayType('application/vnd.apple.mpegurl')) ? [base + 'index.m3u8', base + 'index.m3u8?retry=1', base + 'live.mp4'] : [base + 'live.mp4', base + 'index.m3u8'];
     let k = 0; v.src = srcs[0];
-    v.onplaying = () => { msg.textContent = 'Live'; };
+    v.onplaying = () => { if (mode === 'live') msg.textContent = 'Live'; };
     v.onerror = () => { if (mode === 'live' && route.view === 'cam' && ++k < srcs.length) { v.src = srcs[k]; const q = v.play(); if (q && q.catch) q.catch(() => {}); } else if (mode === 'live' && route.view === 'cam') msg.textContent = 'Live stream unavailable. Try again.'; };
     const p = v.play(); if (p && p.catch) p.catch(() => {});
   }
@@ -215,7 +215,7 @@
   const get = async url => { const r=await fetch(url,{credentials:'same-origin'});if(!r.ok)throw new Error('Recording unavailable ('+r.status+')');return r.json(); };
   let tlCam=null,generation=0,hls=null,data=null,mode='live',center=Date.now()/1000,zoom=3;
   let spans={},events=[],selected=false,rangeS=0,rangeE=0,exportTimer=null,exportSeq=0,pollTimer=null,followTimer=null,raf=0,loadTimer=null;
-  let seekSequence=0,gesture=null,windowKey='',playDay='',soundWanted=false,loadedCenter=0;
+  let seekSequence=0,watchdog=0,gesture=null,windowKey='',playDay='',soundWanted=false,loadedCenter=0;
   const cache=new Map(),playCache=new Map(),pointers=new Map();
   const span=()=>levels[zoom], left=()=>center-span()/2;
   const query=(start,end,extra={})=>new URLSearchParams({cam:tlCam,start:Math.floor(start),end:Math.ceil(end),...extra});
@@ -237,34 +237,58 @@
     for(let t=Math.ceil(left()/step)*step;t<left()+span();t+=step){const d=new Date(t*1000),label=d.toLocaleTimeString([],{hour:'numeric',...(d.getMinutes()?{minute:'2-digit'}:{}),hour12:true}).replace(':00','');if(x(t)>24&&x(t)<w-24)ctx.fillText(label,x(t),57);}
     updatePill();
   }
-  function releasePlayback(){seekSequence++;if(hls)hls.destroy();hls=null;data=null;playDay='';v.onerror=null;v.onplaying=null;v.pause();v.removeAttribute('src');v.load();}
+  function releasePlayback(){seekSequence++;if(hls)hls.destroy();hls=null;data=null;playDay='';v.onerror=null;v.onplaying=null;v.pause();v.removeAttribute('src');v.load();v.disableRemotePlayback=false;$('cam-retry').hidden=true;}
   function timelineStop(){generation++;tlCam=null;releasePlayback();clearTimeout(exportTimer);clearTimeout(loadTimer);clearInterval(pollTimer);clearInterval(followTimer);cancelAnimationFrame(raf);raf=0;exportSeq++;pointers.clear();gesture=null;cache.clear();playCache.clear();}
   async function refreshTimeline(force=false){if(!tlCam||!visible())return;const g=generation,a=Math.floor((center-span()*1.5)/3600)*3600,b=Math.ceil((center+span()*1.5)/3600)*3600,key=localDate(new Date(center*1000))+':'+a+':'+b;windowKey=key;
     try{let j=cache.get(key);if(!j||force){const timeline=await get(CR+'/api/timeline?'+query(a,b));await cdReady;if(g!==generation)return;const evs=detOf[tlCam]?await get(CD+'/api/events?'+new URLSearchParams({camera:detOf[tlCam],since:a,until:b,limit:500})).catch(()=>[]):[];j={spans:timeline.spans,events:evs};cache.set(key,j);if(cache.size>30)cache.delete(cache.keys().next().value);}if(g!==generation||key!==windowKey)return;loadedCenter=center;spans=j.spans||{};events=(Array.isArray(j.events)?j.events:[]).sort((a,b)=>a.start_ts-b.start_ts);drawTimeline();}catch(e){if(g===generation)$('tl-msg').textContent=e.message;}}
   function moved(){center=Math.min(center,Date.now()/1000);drawTimeline();clearTimeout(loadTimer);loadTimer=setTimeout(()=>refreshTimeline(),120);}
   function timelineStart(id){timelineStop();tlCam=id;mode='live';center=Date.now()/1000;zoom=3;spans={};events=[];selected=false;$('tl-range').hidden=true;$('tl-select').setAttribute('aria-pressed','false');$('tl-date').max=localDate(new Date());$('tl-msg').textContent='';$('cam-unmute').hidden=true;refreshTimeline();drawTimeline();pollTimer=setInterval(()=>{if(visible()&&Math.abs(Date.now()/1000-center)<=span()/2){playCache.clear();refreshTimeline(true);}},60000);followTimer=setInterval(()=>{if(tlCam&&visible()&&mode==='live'&&!gesture){center=Date.now()/1000;drawTimeline();}},1000);}
-  async function playSound(){v.muted=!soundWanted;try{await v.play();$('cam-unmute').hidden=v.muted===false;}catch(e){v.muted=true;$('cam-unmute').hidden=false;v.play().catch(()=>{$('tl-msg').textContent='Tap Play to start.';});}}
-  async function seekWall(t){const g=generation,id=++seekSequence;if(mode==='live')liveStop();mode='playback';soundWanted=true;center=Math.min(t,Date.now()/1000);moved();updatePill();const [a,b]=dayBounds(center),key=localDate(new Date(center*1000));
-    try{if(!data||playDay!==key){let j=playCache.get(key);if(!j){j=await get(CR+'/api/playback?'+query(a,b));if(g!==generation||id!==seekSequence)return;playCache.set(key,j);}if(!j.segments.length)throw new Error('No footage for this day');releasePlayback();seekSequence=id;data=j;playDay=key;const url=new URL(j.playlist,location.origin+CR+'/api/').href;if(window.Hls&&Hls.isSupported()){hls=new Hls({enableWorker:false,lowLatencyMode:false,maxBufferLength:30,backBufferLength:60});hls.loadSource(url);hls.attachMedia(v);}else v.src=url;}
-      if(g!==generation||id!==seekSequence)return;const e=data.segments.find(e=>e.end>center)||data.segments[data.segments.length-1],media=e.offset+clamp(center-e.start,0,e.duration-.01);center=e.start+media-e.offset;
-      const seek=()=>{if(g!==generation||id!==seekSequence)return;v.currentTime=media;playSound();};if(v.readyState)seek();else v.addEventListener('loadedmetadata',seek,{once:true});$('tl-msg').textContent='';drawTimeline();
-    }catch(e){if(g===generation)$('tl-msg').textContent=e.message;}}
-  v.addEventListener('timeupdate',()=>{if(mode!=='playback'||!data||gesture)return;const e=data.segments.find(e=>v.currentTime>=e.offset&&v.currentTime<e.offset+e.duration);if(e){const previous=localDate(new Date(center*1000));center=e.start+v.currentTime-e.offset;drawTimeline();if(previous!==localDate(new Date(center*1000))||Math.abs(center-loadedCenter)>span()/2)refreshTimeline();}});
+  function enterPlayback(){if(mode==='live')liveStop();mode='playback';msg.textContent='';v.autoplay=false;}
+  // Must run inside the tap: iOS only keeps sound for an element that was played during a user gesture.
+  function primeSound(){soundWanted=true;v.muted=false;const p=v.play();if(p&&p.catch)p.catch(()=>{});}
+  async function playSound(id){v.muted=!soundWanted;try{await v.play();$('cam-unmute').hidden=!v.muted;}catch(e){if(id!==seekSequence||mode!=='playback'||e.name==='AbortError')return;v.muted=true;$('cam-unmute').hidden=false;v.play().catch(()=>{$('tl-msg').textContent='Tap Play to start.';});}}
+  function loadFailed(){clearTimeout(watchdog);watchdog=0;$('cam-retry').hidden=false;}
+  function armWatchdog(id){clearTimeout(watchdog);$('cam-retry').hidden=true;watchdog=setTimeout(()=>{watchdog=0;if(id===seekSequence&&mode==='playback'&&!gesture&&visible()&&v.readyState<3)loadFailed();},STALL_MS);}
+  function attachPlayback(url,media,id){
+    if(window.Hls&&Hls.isSupported()){
+      v.disableRemotePlayback=true; // ManagedMediaSource on iOS 17+ refuses to attach without it.
+      const h=hls=new Hls({enableWorker:false,lowLatencyMode:false,maxBufferLength:30,backBufferLength:60,startPosition:media});
+      h.on(Hls.Events.MANIFEST_PARSED,()=>{if(h===hls)playSound(seekSequence);});
+      h.on(Hls.Events.ERROR,(_,d)=>{console.warn('hls.js error',d.type,d.details,d.fatal?'(fatal)':'');if(d.fatal&&h===hls)loadFailed();});
+      h.loadSource(url);h.attachMedia(v);
+    }else{
+      v.onerror=()=>{if(mode==='playback')loadFailed();};
+      v.addEventListener('loadedmetadata',()=>{if(id!==seekSequence)return;v.currentTime=media;playSound(id);},{once:true});
+      v.addEventListener('canplay',()=>{if(id===seekSequence&&Math.abs(v.currentTime-media)>2)v.currentTime=media;},{once:true});
+      v.src=url;playSound(id); // iOS may not fetch metadata until play() is called.
+    }
+  }
+  async function seekWall(t){const g=generation,id=++seekSequence,stale=()=>g!==generation||id!==seekSequence;enterPlayback();primeSound();armWatchdog(id);center=Math.min(t,Date.now()/1000);moved();updatePill();const [a,b]=dayBounds(center),key=localDate(new Date(center*1000));
+    try{const reuse=data&&playDay===key&&v.readyState>0;let j=data; // Until metadata arrives, a new seek can only be honoured by starting over.
+      if(!reuse){j=playCache.get(key);if(!j){j=await get(CR+'/api/playback?'+query(a,b));if(stale())return;playCache.set(key,j);}if(!j.segments.length)throw new Error('No footage for this day');}
+      const e=j.segments.find(e=>e.end>center)||j.segments[j.segments.length-1],media=e.offset+clamp(center-e.start,0,e.duration-.01);center=e.start+media-e.offset;
+      if(reuse){v.currentTime=media;playSound(id);}else{releasePlayback();seekSequence=id;data=j;playDay=key;attachPlayback(new URL(j.playlist,location.origin+CR+'/api/').href,media,id);}
+      $('tl-msg').textContent='';drawTimeline();
+    }catch(e){if(!stale()){clearTimeout(watchdog);watchdog=0;$('tl-msg').textContent=e.message;}}}
+  v.addEventListener('timeupdate',()=>{if(mode!=='playback'||!data||gesture||v.seeking||v.readyState<2)return;const e=data.segments.find(e=>v.currentTime>=e.offset&&v.currentTime<e.offset+e.duration);if(e){const previous=localDate(new Date(center*1000));center=e.start+v.currentTime-e.offset;drawTimeline();if(previous!==localDate(new Date(center*1000))||Math.abs(center-loadedCenter)>span()/2)refreshTimeline();}});
+  v.addEventListener('seeking',()=>{if(mode==='playback'&&data&&!watchdog)armWatchdog(seekSequence);}); // Native scrubber seeks.
+  v.addEventListener('playing',()=>{clearTimeout(watchdog);watchdog=0;$('cam-retry').hidden=true;});
   v.addEventListener('play',()=>drawTimeline());v.addEventListener('pause',()=>drawTimeline());
   v.addEventListener('ended',()=>{if(mode==='playback'){const next=data&&data.segments[data.segments.length-1];if(next&&localDate(new Date((next.end+1)*1000))!==playDay)seekWall(next.end+1);}});
   $('cam-live').addEventListener('click',()=>{center=Date.now()/1000;liveStart(tlCam);moved();});
+  $('cam-retry').addEventListener('click',()=>{playCache.clear();releasePlayback();seekWall(center);});
   $('cam-unmute').addEventListener('click',()=>{soundWanted=true;v.muted=false;v.play().then(()=>{$('cam-unmute').hidden=true;}).catch(()=>{});});
   function zoomAt(delta){zoom=clamp(zoom+delta,0,levels.length-1);moved();}
   $('tl-in').addEventListener('click',()=>zoomAt(1));$('tl-out').addEventListener('click',()=>zoomAt(-1));
   const xTime=x=>left()+(x-bar.getBoundingClientRect().left)/bar.clientWidth*span();
-  bar.addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();zoomAt(e.deltaY<0?1:-1);}else if(Math.abs(e.deltaX)>Math.abs(e.deltaY)){e.preventDefault();if(mode==='live')liveStop();mode='playback';v.pause();center+=e.deltaX/bar.clientWidth*span();moved();clearTimeout(loadTimer);loadTimer=setTimeout(()=>seekWall(center),220);}},{passive:false});
+  bar.addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();zoomAt(e.deltaY<0?1:-1);}else if(Math.abs(e.deltaX)>Math.abs(e.deltaY)){e.preventDefault();enterPlayback();v.pause();center+=e.deltaX/bar.clientWidth*span();moved();clearTimeout(loadTimer);loadTimer=setTimeout(()=>seekWall(center),220);}},{passive:false});
   bar.addEventListener('pointerdown',e=>{bar.setPointerCapture(e.pointerId);pointers.set(e.pointerId,e.clientX);const t=xTime(e.clientX),hit=span()*22/bar.clientWidth;if(pointers.size===1)gesture={x:e.clientX,center,moved:false,kind:selected&&Math.abs(t-rangeS)<hit?'start':selected&&Math.abs(t-rangeE)<hit?'end':'pan'};else{gesture.pinch=Math.abs([...pointers.values()][0]-[...pointers.values()][1]);gesture.multi=true;}v.pause();});
   bar.addEventListener('pointermove',e=>{if(!pointers.has(e.pointerId)||!gesture)return;pointers.set(e.pointerId,e.clientX);if(pointers.size===2){const p=[...pointers.values()],dist=Math.abs(p[0]-p[1]);if(Math.abs(dist-gesture.pinch)>30){zoomAt(dist>gesture.pinch?1:-1);gesture.pinch=dist;}return;}if(gesture.multi)return;const dx=e.clientX-gesture.x;if(Math.abs(dx)>5)gesture.moved=true;if(!gesture.moved)return;if(gesture.kind==='start'){rangeS=clamp(xTime(e.clientX),rangeE-1800,rangeE-1);syncRange();}else if(gesture.kind==='end'){rangeE=clamp(xTime(e.clientX),rangeS+1,rangeS+1800);syncRange();}else{center=gesture.center-dx/bar.clientWidth*span();moved();}});
   bar.addEventListener('pointerup',e=>{pointers.delete(e.pointerId);if(!gesture||pointers.size)return;const g=gesture;gesture=null;if(g.multi){drawTimeline();return;}if(g.kind!=='pan'&&g.moved)return;let t=g.moved?center:xTime(e.clientX);const hit=span()*10/bar.clientWidth,ev=events.reduce((best,e)=>Math.abs(e.start_ts-t)<hit&&(!best||Math.abs(e.start_ts-t)<Math.abs(best.start_ts-t))?e:best,null);seekWall(!g.moved&&ev?ev.start_ts-5:t);});
   bar.addEventListener('pointercancel',()=>{pointers.clear();gesture=null;drawTimeline();});
   bar.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();seekWall(center+(e.key==='ArrowLeft'?-10:10));}else if(e.key==='+'||e.key==='-'){e.preventDefault();zoomAt(e.key==='+'?1:-1);}});
   $('tl-back').addEventListener('click',()=>seekWall(center-10));$('tl-forward').addEventListener('click',()=>seekWall(center+10));
-  $('tl-play').addEventListener('click',()=>{if(mode==='live'||!data)seekWall(center);else if(v.paused)playSound();else v.pause();});
+  $('tl-play').addEventListener('click',()=>{if(mode==='live'||!data)seekWall(center);else if(v.paused)playSound(seekSequence);else v.pause();});
   for(const [id,dir] of [['det-prev',-1],['det-next',1]])$('tl-'+id).addEventListener('click',()=>{const list=dir<0?[...events].reverse():events,e=list.find(e=>dir<0?e.start_ts<center-1:e.start_ts>center+6);if(e)seekWall(e.start_ts-5);});
   $('tl-calendar').addEventListener('click',()=>{const d=$('tl-date');d.value=localDate(new Date(center*1000));try{d.showPicker();}catch(e){d.focus();d.click();}});
   $('tl-date').addEventListener('change',async()=>{const t=+new Date($('tl-date').value+'T12:00:00')/1000;if(!Number.isFinite(t))return;const g=generation,[a,b]=dayBounds(t);try{const j=await get(CR+'/api/timeline?'+query(a,b));if(g!==generation)return;seekWall(j.spans.sub.length?j.spans.sub[0][0]:t);}catch(e){$('tl-msg').textContent=e.message;}});

@@ -60,13 +60,14 @@ body.cd-lb-open{overflow:hidden}
 #tl-out{margin-left:auto}#tl-date{position:absolute;right:44px;bottom:0;width:44px;height:44px;opacity:0;pointer-events:none;box-sizing:border-box}
 #tl-msg:empty,#cam-msg:empty{display:none}#tl-msg,#cam-msg{font-size:12px;color:var(--mut);margin:5px 0;min-height:0}
 #tl-range{position:relative;padding:16px;background:var(--card,#202329);border-radius:12px;margin-top:8px;font-size:13px}
-#tl-range[hidden],#tl-download[hidden],#cam-live[hidden],#cam-unmute[hidden]{display:none}
+#tl-range[hidden],#tl-download[hidden],#cam-live[hidden],#cam-unmute[hidden],#cam-retry[hidden]{display:none}
 .tl-cancel{position:absolute;right:0;top:0}.tl-times{display:flex;gap:12px;align-items:end;padding-right:24px;flex-wrap:wrap}.tl-times label{display:flex;flex-direction:column;gap:5px;color:var(--mut)}
 .tl-times input{min-width:0;max-width:130px;min-height:44px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--fg);font:inherit;padding:5px;box-sizing:border-box;color-scheme:dark}
 #tl-duration{color:var(--mut);padding-bottom:12px}#tl-export-msg{color:var(--mut);font-size:12px}#tl-download{display:flex;justify-content:center;align-items:center;min-height:44px;background:var(--acc,#7859de);border-radius:8px;color:white;text-decoration:none;font-weight:600}
 .cam-mode,#cam-live,#cam-unmute{position:absolute;border:0;border-radius:20px;background:rgba(0,0,0,.58);color:#fff;font:500 11px system-ui;backdrop-filter:blur(8px)}
 .cam-mode{left:10px;top:12px;padding:7px 10px;pointer-events:none;max-width:calc(100% - 145px);white-space:nowrap}.cam-mode.live:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#fa525b;margin-right:6px}
 #cam-live{right:58px;top:4px;min-height:44px;padding:0 12px;cursor:pointer}#cam-unmute{left:10px;bottom:48px;min-height:44px;padding:0 12px;cursor:pointer}
+#cam-retry{position:absolute;inset:0;width:100%;padding:16px;border:0;background:rgba(0,0,0,.72);color:#fff;font:500 14px system-ui;cursor:pointer}
 #view-cam{min-width:0}.wrap{min-width:0}#cam-msg{margin-bottom:4px}.cam-fs{top:4px;right:6px;background:rgba(0,0,0,.58)}
 @media(min-width:360px) and (max-width:440px){#view-cam{margin-left:-12px;margin-right:-12px}.cam-head,.cam-sub,#cam-list,#cam-more,#cam-off{margin-left:12px;margin-right:12px}.cam-player{border-radius:10px}.tl-controls{padding:0}#tl-bar{border-radius:10px}}
 @media(max-width:359px){.tl-controls{flex-wrap:wrap;justify-content:center}#tl-out{margin-left:0}.tl-icon{flex-basis:44px}.cam-mode{font-size:10px}.tl-times{gap:6px}}
