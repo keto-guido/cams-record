@@ -78,13 +78,21 @@ def select_segments(rows, latest, start, end, gap_tolerance_s=2.0):
     return "gone", []
 
 
-def ffmpeg_command(ffmpeg, listing, output, rows, start, end, audio=True):
-    # Input seeking retains the preceding keyframe when stream copying. The
-    # duration is relative to the requested seek, so that early frames are extra.
+def concat_listing(paths, rows, start, end):
+    lines = []
+    for index, (path, row) in enumerate(zip(paths, rows, strict=True)):
+        lines.append("file '" + path.replace("\\", "/").replace("'", "'\\''") + "'\n")
+        if index == 0:
+            lines.append(f"inpoint {max(0, start - row['start_ts'])}\n")
+        if index == len(rows) - 1:
+            lines.append(f"outpoint {end - row['start_ts']}\n")
+    return "".join(lines)
+
+
+def ffmpeg_command(ffmpeg, listing, output, rows, audio=True):
+    # Trim within each file: input-side seeking is unreliable with concat.
     cmd = [ffmpeg, "-v", "error", "-y", "-f", "concat", "-safe", "0",
-           "-ss", str(max(0, start - rows[0]["start_ts"])), "-i", str(listing),
-           "-t", str(end - max(start, rows[0]["start_ts"])),
-           "-map", "0:v:0"]
+           "-i", str(listing), "-map", "0:v:0"]
     cmd += ["-map", "0:a?"] if audio else ["-an"]
     cmd += ["-c", "copy"]
     if rows[0].get("codec", "") in ("hevc", "h265"):
@@ -161,12 +169,7 @@ class Clips:
             with tempfile.TemporaryDirectory(dir=self.cache) as tmp:
                 listing, output = Path(tmp) / "concat.txt", Path(tmp) / "clip.mp4"
                 paths = [resolve_segment_path(self.root, r["path"])[0] for r in rows]
-                # The concat demuxer needs every duration to support seeking.
-                listing.write_text(
-                    "".join("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n"
-                            + f"duration {r['end_ts'] - r['start_ts']}\n"
-                            for p, r in zip(paths, rows, strict=True)),
-                    encoding="utf-8")
+                listing.write_text(concat_listing(paths, rows, start, end), encoding="utf-8")
                 prefix = []
                 if shutil.which("nice"):
                     prefix += ["nice", "-n", "10"]
@@ -174,7 +177,7 @@ class Clips:
                     prefix += ["ionice", "-c3"]
                 try:
                     for audio in (True, False):
-                        command = ffmpeg_command(self.ffmpeg, listing, output, rows, start, end, audio)
+                        command = ffmpeg_command(self.ffmpeg, listing, output, rows, audio)
                         result = subprocess.run(prefix + command,
                                                 capture_output=True, timeout=float(self.cfg["timeout_s"]))
                         if result.returncode == 0:

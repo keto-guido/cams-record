@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
-from cams_record.clips import Clips, ffmpeg_command, parse_time, select_segments
+from cams_record.clips import Clips, concat_listing, ffmpeg_command, parse_time, select_segments
 from cams_record.config import DEFAULTS, deep_merge
 from cams_record.protection import DetectionProtection, event_window
 from cams_record.web import create_app
@@ -31,11 +31,8 @@ def test_selection(rows, latest, start, end, state):
 
 
 def test_command_and_window():
-    cmd = ffmpeg_command("ffmpeg", "list", "out", [seg(100, 160)], 110, 140)
-    assert cmd[cmd.index("-ss") + 1] == "10"
-    assert cmd.index("-ss") < cmd.index("-i") < cmd.index("-t")
-    assert cmd[cmd.index("-t") + 1] == "30"
-    assert "-to" not in cmd
+    cmd = ffmpeg_command("ffmpeg", "list", "out", [seg(100, 160)])
+    assert not {"-ss", "-t", "-to"}.intersection(cmd)
     assert cmd[cmd.index("-avoid_negative_ts") + 1] == "make_zero"
     assert cmd[cmd.index("-movflags") + 1] == "+faststart"
     assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
@@ -254,7 +251,7 @@ def test_long_gop_clip_covers_requested_window(setup, start, end):
     assert first == pytest.approx((start // 10) * 10)
     assert first <= start
     assert last >= end - 0.01
-    assert float(info["format"]["duration"]) >= end - start
+    assert end - start <= float(info["format"]["duration"]) <= end - start + 10 + 1
     assert float(packets[0]["dts_time"]) >= 0
 
 
@@ -291,8 +288,9 @@ def test_restart_duplicates_choose_furthest_chain():
     state, selected = select_segments(rows, 121.969, 10, 120)
     assert state == "available"
     assert selected == [rows[1], rows[3]]
-    cmd = ffmpeg_command("ffmpeg", "list", "out", selected, 10, 120)
-    assert float(cmd[cmd.index("-ss") + 1]) == 10 - rows[1]["start_ts"]
+    listing = concat_listing([r["path"] for r in selected], selected, 10, 120)
+    assert f"inpoint {10 - rows[1]['start_ts']}\n" in listing
+    assert f"outpoint {120 - rows[3]['start_ts']}\n" in listing
 
 
 def test_overlap_only_used_when_needed():
@@ -317,3 +315,18 @@ def test_selection_never_replays_same_file():
     assert state == "available"
     assert [r["path"] for r in selected] == ["a.mp4", "60.mp4"]
     assert select_segments(rows[:2], 60.999, 10, 60.5)[0] != "available"
+
+
+@pytest.mark.parametrize("rows,start,end,expected", [
+    ([seg(100, 160)], 120, 132, "file 'a.mp4'\ninpoint 20\noutpoint 32\n"),
+    ([seg(100, 160), seg(160, 220)], 120, 190,
+     "file 'a.mp4'\ninpoint 20\nfile 'b.mp4'\noutpoint 30\n"),
+    ([seg(100, 160)], 99, 132, "file 'a.mp4'\ninpoint 0\noutpoint 32\n"),
+])
+def test_concat_trim_directives(rows, start, end, expected):
+    assert concat_listing(["a.mp4", "b.mp4"][:len(rows)], rows, start, end) == expected
+
+
+def test_concat_path_escaping():
+    listing = concat_listing(["C:\\footage\\front door's.mp4"], [seg()], 20, 32)
+    assert listing == "file 'C:/footage/front door'\\''s.mp4'\ninpoint 20\noutpoint 32\n"
