@@ -13,6 +13,9 @@ from pathlib import Path
 from .clips import ClipError, concat_listing, ffmpeg_command
 from .retention import UnsafePath, resolve_segment_path
 
+MAX_SEGMENT_OFFSET_MS = 30 * 3600 * 1000
+TS_BASE_S = 10  # Constant pre-roll so remuxed timestamps are never near zero.
+
 
 def playback_entries(rows, start, end, gap_tolerance_s=2.0):
     entries, paths, offset = [], set(), 0
@@ -39,18 +42,22 @@ def playback_entries(rows, start, end, gap_tolerance_s=2.0):
     return entries
 
 
-def playlist(entries, tolerance):
+def playlist(entries):
+    """VOD playlist whose segment timestamps follow the cumulative media offsets.
+
+    Each URI carries its entry's offset so the remux stamps that exact position; the
+    playlist is one continuous timeline, even across recording gaps and UTC days.
+    """
     lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-PLAYLIST-TYPE:VOD',
              f'#EXT-X-TARGETDURATION:{math.ceil(max(e["duration"] for e in entries))}',
              '#EXT-X-MEDIA-SEQUENCE:0']
     previous = None
     for e in entries:
-        if previous and (abs(e['start'] - previous['end']) > tolerance
-                         or e['codec'] != previous['codec']
-                         or int(e['start'] // 86400) != int(previous['start'] // 86400)):
+        if previous and e['codec'] != previous['codec']:
             lines.append('#EXT-X-DISCONTINUITY')
         stamp = datetime.fromtimestamp(e['start'], UTC).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-        lines += [f'#EXT-X-PROGRAM-DATE-TIME:{stamp}', f'#EXTINF:{e["duration"]:.3f},', f'seg/{e["id"]}.ts']
+        lines += [f'#EXT-X-PROGRAM-DATE-TIME:{stamp}', f'#EXTINF:{e["duration"]:.3f},',
+                  f'seg/{e["id"]}.ts?o={round(e["offset"] * 1000)}']
         previous = e
     return '\n'.join(lines + ['#EXT-X-ENDLIST', ''])
 
@@ -91,7 +98,7 @@ class Media:
         except OSError as exc:
             raise ClipError(500, 'media assembler unavailable') from exc
 
-    def ts(self, camera, segment_id):
+    def ts(self, camera, segment_id, offset_ms):
         row = self.clips.db.segment_by_id(segment_id)
         if (not row or row['camera_id'] != camera or row['quality'] != 'sub'
                 or row.get('missing') or row.get('deleted_at')):
@@ -103,7 +110,7 @@ class Media:
         except UnsafePath as exc:
             raise ClipError(404, 'segment unavailable') from exc
         self.hls.mkdir(parents=True, exist_ok=True)
-        target = self.hls / f'{segment_id}_{os.stat(source).st_mtime_ns}.ts'
+        target = self.hls / f'{segment_id}_{os.stat(source).st_mtime_ns}_{offset_ms}.ts'
         with self.remuxes:
             with self.cache_lock:
                 self.trim_old(self.hls, '*.lease', 3600)
@@ -116,7 +123,7 @@ class Media:
                     cmd = [self.clips.ffmpeg, '-v', 'error', '-nostdin', '-y', '-i', str(source), '-map', '0:v:0']
                     cmd += ['-map', '0:a?'] if audio else ['-an']
                     cmd += ['-c', 'copy', '-copyinkf:a', '-f', 'mpegts', '-mpegts_copyts', '0',
-                            '-output_ts_offset', str(row['start_ts'] % 86400 + 1),
+                            '-output_ts_offset', f'{offset_ms / 1000 + TS_BASE_S:.3f}',
                             '-muxdelay', '0', '-muxpreload', '0', str(output)]
                     if self.run(cmd, self.clips.cfg['timeout_s']):
                         break

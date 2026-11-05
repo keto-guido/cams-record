@@ -508,8 +508,8 @@ Times accept epoch seconds or ISO8601 with an explicit timezone.
 |---|---|
 | `/api/timeline?cam=front-door&start=…&end=…` | Main/sub recorded spans, gap tolerance and latest indexed ends; `camera` aliases `cam`; maximum 8 days |
 | `/api/playback?cam=front-door&start=…&end=…` | Sub-quality media offsets and relative HLS playlist URL; maximum 26 hours |
-| `/api/hls/{cam}/index.m3u8?start=…&end=…` | VOD playlist with UTC program times and discontinuities at gaps, codec changes and UTC days |
-| `/api/hls/{cam}/seg/{id}.ts` | Sub segment remuxed to MPEG-TS, with copied video and audio; private cache |
+| `/api/hls/{cam}/index.m3u8?start=…&end=…` | VOD playlist with UTC program times on one continuous media timeline; discontinuities only at codec changes |
+| `/api/hls/{cam}/seg/{id}.ts?o=…` | Sub segment remuxed to MPEG-TS, with copied video and audio; private cache. `o` (required, 0–30 h in milliseconds) is the entry's media offset, and timestamps start at `o` + 10 s |
 | `/api/export/info?cam=front-door&start=…&end=…` | Availability, estimated bytes, recommended quality and export busy state |
 | `/api/export?cam=front-door&start=…&end=…&quality=main&fallback=1` | Attachment download; falls back to sub only when main is gone; `X-Export-Quality` identifies the result |
 

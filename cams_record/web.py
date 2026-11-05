@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -15,7 +16,7 @@ from .auth import Authenticator, AuthError, Principal
 from .clips import ClipError, Clips, merge_spans, parse_time, validate_window
 from .config import CAMERA_ID_RE
 from .db import DBUnavailable
-from .media import Media, playback_entries, playlist
+from .media import MAX_SEGMENT_OFFSET_MS, Media, playback_entries, playlist
 
 log = logging.getLogger(__name__)
 
@@ -136,14 +137,16 @@ def create_app(service, cfg: dict):
         _, _, _, entries = playback_data(cam, None, start, end)
         if not entries:
             raise ClipError(404, "no recorded segments")
-        return PlainTextResponse(playlist(entries, clips.cfg["gap_tolerance_s"]),
+        return PlainTextResponse(playlist(entries),
                                  media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store"})
 
     @r.get("/api/hls/{cam}/seg/{segment_id}.ts")
-    def hls_segment(cam: str, segment_id: int, _: Principal = Depends(clip_user)):
+    def hls_segment(cam: str, segment_id: int, o: str | None = None, _: Principal = Depends(clip_user)):
+        if o is None or not re.fullmatch(r"[0-9]{1,9}", o) or int(o) > MAX_SEGMENT_OFFSET_MS:
+            raise ClipError(400, "invalid segment offset")
         if service.db is None:
             raise ClipError(503, "segment index unavailable")
-        path = media.ts(cam, segment_id)
+        path = media.ts(cam, segment_id, int(o))
         return CleanupFileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "private, max-age=86400"},
                                    cleanup=lambda: path.unlink(missing_ok=True))
 

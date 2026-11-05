@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -46,19 +47,25 @@ def test_timeline_and_playlist(setup):
     assert p['playlist'].startswith('hls/cam/')
     r = client.get('/api/hls/cam/index.m3u8?start=0&end=200', headers=HEADERS)
     assert r.status_code == 200
-    assert '#EXTINF:60.000,\nseg/1.ts' in r.text
-    assert '#EXT-X-DISCONTINUITY' in r.text
+    assert '#EXTINF:60.000,\nseg/1.ts?o=0\n' in r.text
+    assert re.findall(r'seg/(\d+)\.ts\?o=(\d+)', r.text) == [
+        (str(e['id']), str(round(e['offset'] * 1000))) for e in p['segments']]
+    assert 'seg/3.ts?o=110000\n' in r.text
+    assert '#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:02:00.000Z' in r.text
+    assert '#EXT-X-DISCONTINUITY' not in r.text  # 100..120 is a recording gap.
     assert r.text.endswith('#EXT-X-ENDLIST\n')
     assert r.headers['cache-control'] == 'no-store'
     db.segment_rows.return_value = []
     assert client.get('/api/hls/cam/index.m3u8?start=0&end=200', headers=HEADERS).status_code == 404
 
 
-def test_day_codec_discontinuity():
+def test_discontinuity_only_on_codec_change():
     from cams_record.media import playlist
     entries = playback_entries([seg(86340, 86400) | {'id': 1}, seg(86400, 86460) | {'id': 2},
-                                seg(86460, 86520) | {'id': 3, 'codec': 'h264'}], 86340, 86520)
-    assert playlist(entries, 2).count('#EXT-X-DISCONTINUITY') == 2
+                                seg(86500, 86520) | {'id': 3, 'codec': 'h264'}], 86340, 86520)
+    text = playlist(entries)
+    assert text.count('#EXT-X-DISCONTINUITY') == 1
+    assert text.index('seg/2.ts?o=60000') < text.index('#EXT-X-DISCONTINUITY') < text.index('seg/3.ts?o=120000')
 
 
 @pytest.mark.parametrize('timestamps,tolerance', [
@@ -87,6 +94,7 @@ def test_playback_boundary_overlap(setup, timestamps, tolerance):
     assert response.status_code == 200
     assert response.text.count('#EXTINF:') == 3
     assert '#EXT-X-DISCONTINUITY' not in response.text
+    assert re.findall(r'\?o=(\d+)', response.text) == [str(round(e['offset'] * 1000)) for e in entries]
 
 
 def test_playback_duplicates_and_overlap_limit():
@@ -103,9 +111,9 @@ def test_playback_duplicates_and_overlap_limit():
         1793846425.0, 1793846581.973)
     assert [e['id'] for e in entries] == [2629, 2639, 2640]
     assert [e['duration'] for e in entries] == pytest.approx([41.133, 59.974, 60])
-    text = playlist(entries, 2)
-    assert text.count('#EXT-X-DISCONTINUITY') == 1
-    assert text.index('seg/2629.ts') < text.index('#EXT-X-DISCONTINUITY') < text.index('seg/2639.ts')
+    text = playlist(entries)
+    assert '#EXT-X-DISCONTINUITY' not in text
+    assert text.index('seg/2629.ts?o=0') < text.index('seg/2639.ts?o=41133') < text.index('seg/2640.ts?o=101107')
 
 
 
@@ -116,11 +124,11 @@ def test_ts_cache_and_audio(setup, monkeypatch):
     make_clip(source, 3)
     row = rows()[0] | {'codec': 'h264', 'end_ts': 3}
     db.segment_by_id.return_value = row
-    assert client.get('/api/hls/wrong/seg/1.ts', headers=HEADERS).status_code == 404
+    assert client.get('/api/hls/wrong/seg/1.ts?o=0', headers=HEADERS).status_code == 404
     db.segment_by_id.return_value = row | {'quality': 'main'}
-    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 404
+    assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).status_code == 404
     db.segment_by_id.return_value = row
-    response = client.get('/api/hls/cam/seg/1.ts', headers=HEADERS)
+    response = client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS)
     assert response.status_code == 200
     output = source.parent / 'probe.ts'
     output.write_bytes(response.content)
@@ -129,7 +137,45 @@ def test_ts_cache_and_audio(setup, monkeypatch):
         capture_output=True, check=True).stdout)
     assert {s['codec_type'] for s in info['streams']} == {'video', 'audio'}
     monkeypatch.setattr(Media, 'run', lambda *a: pytest.fail('cache missed'))
-    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).content == response.content
+    assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).content == response.content
+
+
+def ffprobe_json(path, *args):
+    return json.loads(subprocess.run(['ffprobe', '-v', 'error', *args, '-of', 'json', str(path)],
+                                     capture_output=True, check=True).stdout)
+
+
+@pytest.mark.parametrize('value', ['', 'abc', '-1', '1.5', '+5', '1_000', '108000001', '9' * 10, '\u0663'])
+def test_ts_offset_invalid(setup, value):
+    cfg, db, client = setup
+    assert client.get('/api/hls/cam/seg/1.ts', params={'o': value}, headers=HEADERS).status_code == 400
+
+
+def test_ts_offset_required(setup):
+    cfg, db, client = setup
+    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 400
+
+
+@needs_ffmpeg
+def test_ts_timestamps_follow_offset(setup):
+    cfg, db, client = setup
+    source = Path(cfg['recording']['root']) / 'a.mp4'
+    make_clip(source, 3)
+    # A start time unrelated to the offset: the UTC time of day must not influence timestamps.
+    db.segment_by_id.return_value = rows()[0] | {'start_ts': 1793849883.0, 'end_ts': 1793849886.0}
+    media = client.app.app.state.media
+    for count, offset_ms in enumerate((0, 16665250), 1):
+        response = client.get(f'/api/hls/cam/seg/1.ts?o={offset_ms}', headers=HEADERS)
+        assert response.status_code == 200
+        output = source.parent / f'probe{offset_ms}.ts'
+        output.write_bytes(response.content)
+        streams = ffprobe_json(output, '-show_streams')['streams']
+        assert {s['codec_type'] for s in streams} == {'video', 'audio'}
+        frame = ffprobe_json(output, '-select_streams', 'v:0', '-show_frames',
+                             '-read_intervals', '%+#1')['frames'][0]
+        assert float(frame['pts_time']) == pytest.approx(offset_ms / 1000 + 10, abs=0.1)
+        assert frame['key_frame'] == 1
+        assert len(list(media.hls.glob('*.ts'))) == count
 
 
 def test_export_limits_fallback_cleanup_busy(setup, monkeypatch):
@@ -167,7 +213,7 @@ def test_playback_limits_and_export_not_ready(setup):
     for row in [rows()[0] | {'missing': True}, rows()[0] | {'deleted_at': True},
                 rows()[0] | {'path': '../escape.mp4'}]:
         db.segment_by_id.return_value = row
-        assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 404
+        assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).status_code == 404
 
 
 async def disconnect_request(app, url, on_body):
@@ -231,10 +277,10 @@ def test_ts_disconnect_cleanup(setup, monkeypatch):
     def during_send():
         assert list(media.hls.glob('*.lease'))
 
-    asyncio.run(disconnect_request(client.app, '/api/hls/cam/seg/1.ts', during_send))
+    asyncio.run(disconnect_request(client.app, '/api/hls/cam/seg/1.ts?o=0', during_send))
     assert not list(media.hls.glob('*.lease'))
     assert list(media.hls.glob('*.ts'))
-    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).status_code == 200
     assert not list(media.hls.glob('*.lease'))
 
 
@@ -273,11 +319,11 @@ def test_stale_media_cleanup(setup, monkeypatch):
     for path in (stale_lease, fresh_lease):
         path.write_bytes(b'lease')
     os.utime(stale_lease, (time.time() - 3601,) * 2)
-    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).status_code == 200
     assert not stale_lease.exists()
     assert fresh_lease.exists()
     stale_lease.write_bytes(b'lease')
     os.utime(stale_lease, (time.time() - 3601,) * 2)
     monkeypatch.setattr(Media, 'run', lambda *a: pytest.fail('cache missed'))
-    assert client.get('/api/hls/cam/seg/1.ts', headers=HEADERS).status_code == 200
+    assert client.get('/api/hls/cam/seg/1.ts?o=0', headers=HEADERS).status_code == 200
     assert not stale_lease.exists()
