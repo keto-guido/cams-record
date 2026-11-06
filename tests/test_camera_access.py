@@ -146,7 +146,27 @@ def test_every_camera_route_is_covered(setup):
                    "/cams-record/api/push/event-context/{event_id}", "/cams-record/api/internal/detection-event"}
     covered = {"/cams-record" + u.split("?")[0].replace("{c}", "{cam}").replace("seg/1.ts", "seg/{segment_id}.ts")
                for u in CAMERA_ROUTES}
-    assert found == covered | camera_free
+    assert found == covered | camera_free | set(ADMIN_ONLY)
+
+
+# Camera management (Cameras app -> Admin tab) manages every camera, so it is admin-role only rather
+# than per camera: each method must refuse a non-admin before reading anything.
+ADMIN_ONLY = {
+    "/cams-record/api/admin/cameras": ("GET", "POST"),
+    "/cams-record/api/admin/cameras/{cam_id}": ("GET", "PUT", "DELETE"),
+    "/cams-record/api/admin/streams": ("GET",),
+}
+
+
+@pytest.mark.parametrize("roles", [["cams"], ["cams", "family"]])
+def test_admin_routes_refuse_non_admins(setup, roles):
+    db, _, client = setup
+    for path, methods in ADMIN_ONLY.items():
+        url = path.replace("/cams-record", "").replace("{cam_id}", "open") + "?expect_revision=0"
+        for method in methods:
+            r = client.request(method, url, headers=headers("ann", roles), json={"camera": {}, "expect_revision": 0})
+            assert r.status_code == 403, (method, path, r.status_code)
+    assert not touched(db)
 
 
 @pytest.mark.parametrize("path", ["clip", "clip/info"])

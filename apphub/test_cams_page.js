@@ -20,8 +20,8 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=17'));
-assert(html.includes('cams.css?v=13'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=18'));
+assert(html.includes('cams.css?v=14'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
 assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
 assert(html.includes('apple-mobile-web-app-capable'));
@@ -29,6 +29,11 @@ assert(html.includes('apple-mobile-web-app-capable'));
 assert.deepEqual(pageOptions, {app:'cams',name:'Cameras'});
 assert(html.includes('<nav class="mn-subnav cams-tabs" id="cams-tabs"'));
 for (const view of ['grid','det']) assert(html.includes('class="cams-tab" data-view="'+view+'"'));
+// Camera management is part of the same app: an Admin tab, hidden until cams-record confirms an admin.
+assert(html.includes('<a class="cams-tab" data-view="admin" href="#admin" id="tab-admin" hidden>Admin</a>'));
+for (const id of ['view-admin','view-admin-edit','adm-list','adm-banner','adm-form','adm-history','f-id','f-name','f-enabled','f-main','f-sub','f-snap','f-use','f-defaults','f-vis-everyone','f-vis-restricted','f-users','f-roles','f-detect','f-masks','f-main-days','f-sub-days','adm-save','adm-delete'])
+  assert(html.includes('id="'+id+'"'), id);
+assert(/id="view-admin" hidden/.test(html) && /id="view-admin-edit" hidden/.test(html) && /id="adm-add" hidden/.test(html));
 assert(!/Back to Dashboard|backdash|action="\/logout"|App Hub/.test(html));
 assert(html.includes('id="tl-det-prev" aria-label="Previous detection"'));
 assert(html.includes('id="tl-det-next" aria-label="Next detection"'));
@@ -44,6 +49,11 @@ assert(client.includes("register('/cams/sw.js'") && client.includes('#event='));
 assert(client.includes('Add to Home Screen') && client.includes('normal tab'));
 assert(client.includes('event=([^&]+)'), 'deep link must accept string event ids');
 assert(client.includes('encodeURIComponent(eid)'));
+// Admin writes carry the loaded revision, are JSON, and never build HTML from camera data.
+assert(client.includes("ADM = CR + '/api/admin'") && client.includes('expect_revision: adm.revision'));
+assert(client.includes("'Content-Type': 'application/json'"));
+const adminPart = client.split('// ---------- camera management')[1].split('// ---------- routing')[0];
+assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(adminPart), 'admin view must use textContent only');
 const sw = fs.readFileSync(path.join(__dirname, 'static', 'sw.js'), 'utf8');
 assert(sw.includes("addEventListener('push'") && sw.includes("addEventListener('notificationclick'"));
 assert(sw.includes("clients.openWindow") || sw.includes('openWindow'));

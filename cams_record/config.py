@@ -41,7 +41,8 @@ DEFAULTS: dict[str, Any] = {
     # while also reading cams_config and reporting every difference; db = cams_config.
     "camera_source": "file",
     "http": {"host": "127.0.0.1", "port": 8097},
-    "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}"},
+    "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}",
+               "api_url": "http://127.0.0.1:1984"},  # stream list for the camera admin
     "recording": {
         "root": "/volume1/nvr",
         "segment_time": 60,  # seconds; cuts land on the first keyframe after each clock boundary
@@ -150,6 +151,7 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "AUTH_MODE": (("auth", "mode"), str),
     "AUTH_SECRET_FILE": (("auth", "secret_file"), str),
     "GO2RTC_RTSP_URL": (("go2rtc", "rtsp_url"), str),
+    "GO2RTC_API_URL": (("go2rtc", "api_url"), str),
     "RECORD_ROOT": (("recording", "root"), str),
     "SEGMENT_TIME": (("recording", "segment_time"), int),
     "STATE_DIR": (("recording", "state_dir"), str),

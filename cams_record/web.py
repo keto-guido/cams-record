@@ -91,6 +91,12 @@ def create_app(service, cfg: dict):
         if not got or got != secret:
             raise HTTPException(401, "invalid webhook secret")
 
+    def camera_admin(request: Request) -> Principal:
+        try:
+            return auth.authenticate(request.headers, cfg["auth"].get("admin_roles") or ["admin"])
+        except AuthError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+
     access = getattr(service, "access", None) or CameraAccess(cfg["access"], getattr(service, "cameras", {}))
     if getattr(push, "access", None) is None:
         push.access = access
@@ -397,6 +403,9 @@ def create_app(service, cfg: dict):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status)
 
     app.include_router(r, prefix=base)
+    from .admin import admin_router
+
+    app.include_router(admin_router(service, cfg, camera_admin), prefix=base + "/api/admin")
 
     @app.exception_handler(HTTPException)
     async def http_exc(request: Request, exc: HTTPException):

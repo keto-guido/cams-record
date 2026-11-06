@@ -24,10 +24,38 @@ function spans(start,end,quality='sub'){const n=now(),min=n-(quality==='main'?3:
 const booted=now(); // Fixed origin: an event keeps its id and time across requests, as jumps rely on.
 function events(){const n=booted;return Array.from({length:32},(_,i)=>{const start=n-240-i*440-Math.max(0,i-23)*20000;return{id:String(i+1),camera:cameras[i%2].id,camera_name:cameras[i%2].name,label:i%3?'person':'car',score:.91,start_ts:start,end_ts:start+10,has_snapshot:true,has_snapshot_hires:i%2===0};});}
 const epoch=v=>Number.isFinite(+v)?+v:Date.parse(v)/1000;
+// Stand-in design tokens for when keto-guido/apphub is not checked out next to this repo (values approximate the hub's dark theme).
+const TOKENS=':root{color-scheme:dark;--mn-bg:#121417;--mn-surface-1:#1b1e23;--mn-surface-2:#23272d;--mn-surface-3:#2b3037;--mn-border:#34383e;--mn-border-strong:#4a5059;--mn-text:#edf0f5;--mn-text-muted:#969ba5;--mn-accent:#a18af8;--mn-accent-soft:#2c2547;--mn-on-accent:#14111f;--mn-hover:#262a31;--mn-danger:#f2777a;--mn-danger-solid:#d64545;--mn-on-danger:#fff;--mn-warn:#e8b04a;--mn-success:#5cc98a;--mn-live:#e5484d;--mn-font:system-ui,sans-serif;--mn-text-sm:13px;--mn-text-md:15px;--mn-text-lg:18px;--mn-text-xl:22px;--mn-space-1:4px;--mn-space-2:8px;--mn-space-3:12px;--mn-space-4:16px;--mn-space-6:24px;--mn-radius-sm:6px;--mn-radius-md:10px;--mn-radius-lg:14px;--mn-radius-pill:999px;--mn-tap:44px;--mn-shadow-1:0 1px 2px rgba(0,0,0,.4);--mn-gutter:16px;--mn-content-max:1000px;--mn-bar-height:48px;--mn-subnav-height:44px}body{background:var(--mn-bg);color:var(--mn-text);font-family:var(--mn-font)}.mn-topbar{display:flex;align-items:center;height:var(--mn-bar-height);padding:0 var(--mn-gutter);border-bottom:1px solid var(--mn-border)}.mn-brand{color:inherit;text-decoration:none;font-weight:700}.mn-subnav{display:flex;gap:var(--mn-space-4);padding:0 var(--mn-gutter);border-bottom:1px solid var(--mn-border)}.mn-subnav a{display:flex;align-items:center;min-height:var(--mn-subnav-height);color:var(--mn-text-muted);text-decoration:none}.mn-subnav a[aria-current=page]{color:var(--mn-text);box-shadow:inset 0 -2px var(--mn-accent)}.mn-subnav a[hidden]{display:none}';
+const MODE=process.env.PREVIEW_MODE||'shadow';
+const st=(main,sub)=>({main:{go2rtc_name:main,width:2560,height:1440,codec:'h264',fps:15},sub:{go2rtc_name:sub,width:640,height:360,codec:'h264',fps:15}});
+const adminDb={revision:3,history:{},cams:{
+  'front-door':{id:'front-door',name:'Front Door',enabled:true,connector_type:'go2rtc',connector:{},visibility:'everyone',users:[],roles:[],sort_order:0,streams:st('front-door-main','front-door'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main','sub']},detection:{enabled:true,zones:{porch:[[0,.5],[1,.5],[1,1]]}},recording:{main_days:7},notify:[]},
+  'back-door':{id:'back-door',name:'Back Door',enabled:true,connector_type:'go2rtc',connector:{},visibility:'restricted',users:['ann'],roles:['family'],sort_order:1,streams:st('back-door-main','back-door'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main']},detection:{enabled:false},recording:null,notify:[]},
+  'driveway':{id:'driveway',name:'Driveway',enabled:false,connector_type:'go2rtc',connector:{},visibility:'restricted',users:[],roles:[],sort_order:2,streams:st('driveway-main','driveway'),use:{live:['sub'],record:['main','sub']},detection:null,recording:null,notify:[]}}};
+adminDb.history['front-door']=[{at:new Date(Date.now()-86400e3).toISOString(),actor:'eric',action:'update',revision:3,before:{recording:null},after:{recording:{main_days:7}}},{at:new Date(Date.now()-3*86400e3).toISOString(),actor:'import',action:'import',revision:1,before:null,after:{}}];
+function admin(req,res,p,q,json){
+  const fail=(code,detail)=>send(res,code,JSON.stringify({detail}),'application/json');
+  const list=()=>Object.values(adminDb.cams).sort((a,b)=>a.sort_order-b.sort_order);
+  const m=p.match(/^\/cams-record\/api\/admin\/cameras(?:\/([^/]+))?$/);
+  if(p==='/cams-record/api/admin/streams')return json({reachable:true,streams:['back-door','back-door-main','driveway','driveway-main','front-door','front-door-main','garage','garage-main'].map(name=>({name,used_by:list().filter(c=>Object.values(c.streams).some(s=>s.go2rtc_name===name)).map(c=>c.id)}))});
+  if(!m)return fail(404,'not found');
+  const id=m[1]&&decodeURIComponent(m[1]);
+  if(req.method==='GET'&&!id)return json({revision:adminDb.revision,mode:MODE,editable:MODE!=='file',camera_source:{mode:MODE,revision:adminDb.revision,origin:'db',differences:MODE==='shadow'?[]:undefined,registry:MODE==='db'?{enabled:true,error:null}:undefined},cameras:list().map(c=>({...c,recording_state:c.enabled?{main:'recording',sub:c.id==='back-door'?'backoff':'recording'}:{}}))});
+  if(req.method==='GET'){const c=adminDb.cams[id];if(!c)return fail(404,'camera not found');return json({revision:adminDb.revision,mode:MODE,editable:MODE!=='file',camera:c,history:adminDb.history[id]||[]});}
+  if(MODE==='file')return fail(409,'camera management is read-only while camera_source is file');
+  if(req.method==='DELETE'){if(+q.get('expect_revision')!==adminDb.revision)return fail(409,'changed since revision');delete adminDb.cams[id];adminDb.revision++;return json({revision:adminDb.revision});}
+  let body='';req.on('data',d=>body+=d);req.on('end',()=>{const b=JSON.parse(body||'{}');if(b.expect_revision!==adminDb.revision)return fail(409,'camera settings changed since revision '+b.expect_revision);
+    const f=b.camera,cid=id||f.id;if(!id&&adminDb.cams[cid])return fail(409,'camera '+cid+' already exists');
+    const old=adminDb.cams[cid]||{id:cid,connector_type:'go2rtc',connector:{},sort_order:9,detection:null,notify:[]};
+    const det=f.detection_enabled==null?old.detection:old.detection?{...old.detection,enabled:f.detection_enabled}:(f.detection_enabled?{enabled:true}:null);
+    const c={...old,name:f.name,enabled:f.enabled,visibility:f.visibility,users:f.users,roles:f.roles,streams:f.streams,use:f.use,recording:f.recording&&(f.recording.main_days||f.recording.sub_days)?f.recording:null,detection:det};
+    (adminDb.history[cid]=adminDb.history[cid]||[]).unshift({at:new Date().toISOString(),actor:'Preview',action:id?'update':'create',revision:adminDb.revision+1,before:id?old:null,after:c});
+    adminDb.cams[cid]=c;adminDb.revision++;json({revision:adminDb.revision,camera:c});});
+}
 const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://localhost'),p=u.pathname,q=u.searchParams;const json=j=>send(res,200,JSON.stringify(j),'application/json');
   if(p==='/')return res.writeHead(302,{Location:'/cams/'}),res.end();
   if(p==='/static/style.css')return send(res,200,hubFile('style.css')||base,'text/css');
-  if(p==='/shared/nav.css')return send(res,200,hubFile('shared/nav.css')||'','text/css');
+  if(p==='/shared/nav.css')return send(res,200,hubFile('shared/nav.css')||TOKENS,'text/css');
   if(p==='/shared/nav.js')return send(res,200,hubFile('shared/nav.js')||'','application/javascript');
   if(p==='/shared/icons.svg')return send(res,200,hubFile('shared/icons.svg')||'','image/svg+xml');
   if(p==='/shared/nav.json')return json({user:'Preview',isAdmin:true,csrf:'preview',apps:[{id:'cams',name:'Cameras',description:'Security camera snapshots & live view',icon:'\ud83d\udcf7',path:'/cams/'}]});
@@ -42,6 +70,9 @@ const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://local
   if(p==='/cams-record/api/export/info'||p==='/cams-record/api/clip/info'){const sub=spans(start,end),main=spans(start,end,'main'),status=x=>x.length?'available':end>now()-65?'not_ready':'unavailable';return json({busy:false,recommended:main.length?'main':sub.length?'sub':null,main:{status:status(main),bytes:Math.round((end-start)*750000)},sub:{status:status(sub),bytes:Math.round((end-start)*100000)}});}
   // Full-res clips and exports answer slowly, so the two-step "Save to Photos" flow can be exercised next to the fast one.
   if(p==='/cams-record/api/clip'||p==='/cams-record/api/export'){const name=(q.get('camera')||q.get('cam'))+'_preview_'+(q.get('quality')||'sub')+'.mp4',mp4=()=>send(res,200,clipMp4,'video/mp4',{'Content-Disposition':(q.get('download')==='0'?'inline':'attachment')+'; filename="'+name+'"'});return q.get('quality')==='main'?setTimeout(mp4,1500):mp4();}
+  // Camera management (Admin tab): in-memory camera objects. PREVIEW_MODE=file|shadow|db (default shadow).
+  if(p.startsWith('/cams-record/api/admin/'))return admin(req,res,p,q,json);
+  if(p==='/cams-detect/api/status')return json({service:{camera_source:{mode:MODE,differences:MODE==='shadow'?['back-door: decode_fps differ between cameras.yaml and cams_config']:undefined,fallback_to_files:false,skipped:[]}}});
   if(p.startsWith('/cams-record/'))return send(res,404,'Preview has no media files');
   return app.handle(req,res,{user:'Preview',csrf:'preview'},p,u);
 });
