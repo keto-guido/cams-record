@@ -17,7 +17,7 @@ from .clips import ClipError, Clips, merge_spans, parse_time, validate_window
 from .config import CAMERA_ID_RE
 from .db import DBUnavailable
 from .media import MAX_SEGMENT_OFFSET_MS, Media, playback_entries, playlist
-from .push import DetectionEvent, PushError, PushService
+from .push import DetectionEvent, PushError, PushService, normalize_event_id
 
 log = logging.getLogger(__name__)
 
@@ -287,7 +287,7 @@ def create_app(service, cfg: dict):
 
     @r.post("/api/push/test")
     def push_test(user: Principal = Depends(clip_user)):
-        event = DetectionEvent(id=0, camera_id="test", label="test", score=None,
+        event = DetectionEvent(id="", camera_id="test", label="test", score=None,
                                start_ts=0.0, end_ts=None, camera_name="Cameras")
         try:
             return push.notify_user(user.sub, event, test=True)
@@ -295,18 +295,22 @@ def create_app(service, cfg: dict):
             raise HTTPException(exc.status, exc.detail) from exc
 
     @r.get("/api/push/event-context/{event_id}")
-    def push_event_context(event_id: int, _: Principal = Depends(clip_user)):
+    def push_event_context(event_id: str, _: Principal = Depends(clip_user)):
         """Authorized deep-link helper: metadata only (no snapshots/images)."""
-        if event_id < 1:
-            raise HTTPException(400, "invalid event id")
+        try:
+            eid = normalize_event_id(event_id)
+        except PushError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
         if service.db is None:
             raise HTTPException(503, "database unavailable")
         try:
-            row = service.db.detection_event_by_id(event_id)
+            row = service.db.detection_event_by_id(eid)
         except DBUnavailable as exc:
             raise HTTPException(503, "database unavailable") from exc
         if not row:
             raise HTTPException(404, "event not found")
+        from urllib.parse import quote
+
         return {
             "id": row["id"],
             "camera": row["camera_id"],
@@ -315,7 +319,7 @@ def create_app(service, cfg: dict):
             "score": row["score"],
             "start_ts": row["start_ts"],
             "end_ts": row["end_ts"],
-            "url": f"/cams/#event={row['id']}",
+            "url": f"/cams/#event={quote(str(row['id']), safe='')}",
         }
 
     @r.post("/api/internal/detection-event")
@@ -329,19 +333,23 @@ def create_app(service, cfg: dict):
         if not isinstance(body, dict):
             raise HTTPException(400, "invalid JSON object")
         try:
-            event_id = int(body.get("id") or body.get("event_id"))
-            camera_id = str(body.get("camera_id") or body.get("camera") or "")
+            event_id = normalize_event_id(body.get("id") or body.get("event_id"))
+        except PushError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+        camera_id = str(body.get("camera_id") or body.get("camera") or "")
+        try:
             start_ts = float(body.get("start_ts"))
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, "id, camera_id and start_ts are required") from exc
-        if event_id < 1 or not CAMERA_ID_RE.fullmatch(camera_id):
+        if not CAMERA_ID_RE.fullmatch(camera_id):
             raise HTTPException(400, "invalid id or camera_id")
         end_raw = body.get("end_ts")
         try:
             end_ts = float(end_raw) if end_raw is not None else None
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, "invalid end_ts") from exc
-        score_raw = body.get("score")
+        # Production cams_detect uses max_score; accept score as an alias for the webhook.
+        score_raw = body.get("max_score", body.get("score"))
         try:
             score = float(score_raw) if score_raw is not None else None
         except (TypeError, ValueError) as exc:

@@ -20,7 +20,7 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=16'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=17'));
 assert(html.includes('cams.css?v=13'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
 assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
@@ -42,6 +42,8 @@ assert(client.split('async function saveShare')[1].split('await ')[1].startsWith
 assert(client.includes('MAX_SHARE = 250e6'));
 assert(client.includes("register('/cams/sw.js'") && client.includes('#event='));
 assert(client.includes('Add to Home Screen') && client.includes('normal tab'));
+assert(client.includes('event=([^&]+)'), 'deep link must accept string event ids');
+assert(client.includes('encodeURIComponent(eid)'));
 const sw = fs.readFileSync(path.join(__dirname, 'static', 'sw.js'), 'utf8');
 assert(sw.includes("addEventListener('push'") && sw.includes("addEventListener('notificationclick'"));
 assert(sw.includes("clients.openWindow") || sw.includes('openWindow'));

@@ -12,7 +12,7 @@ and must never be committed.**
 |---|---|---|
 | PWA UI + SW | `apphub/` | Manifest, `/cams/sw.js`, subscribe/unsubscribe control, `#event=<id>` deep link |
 | API + storage | `cams_record/` | VAPID, subscription CRUD, test send (own subs only), event context, webhook, poller |
-| Schema | migration **v5** | `push_subscriptions`, `push_sent_events` (dedupe) |
+| Schema | migrations **v5** + **v6** | `push_subscriptions`; `push_sent_events` (dedupe; `event_id` is `VARCHAR(64)` after v6) |
 
 There is **no public send endpoint**. User routes require the App Hub
 `x-apphub-token` with role `admin` or `cams`. The detection webhook requires
@@ -48,6 +48,11 @@ There is **no public send endpoint**. User routes require the App Hub
 
    Compose mounts them at `/run/secrets/vapid_private_key` and
    `/run/secrets/push_webhook_secret` (see `docker-compose.yml`).
+
+   cams-record loads that PEM with `Vapid.from_pem` / a `Vapid` instance for
+   `pywebpush`. Passing the PEM **text** into `webpush(vapid_private_key=...)` is
+   wrong: pywebpush treats a non-path string as DER via `Vapid.from_string` and
+   fails with `ValueError: Could not deserialize key data`.
 4. **Set `push.vapid_subject`** in `config/config.yaml` to a real contact URI
    (`mailto:you@example.com` or `https://…`). Push services expect this.
 5. **Rebuild/restart cams-record** (schema v5 applies on connect). Confirm logs
@@ -89,7 +94,19 @@ every `push.interval_s` (default 15) and sends once per `event_id` via
 GRANT SELECT ON cams_detect.events TO 'cams_record'@'127.0.0.1';
 ```
 
-Columns used: `id`, `camera_id`, `label`, `score`, `start_ts`, `end_ts`.
+Production `cams_detect.events` columns used by the poller / event-context path:
+
+| column | type (production) | notes |
+|---|---|---|
+| `id` | string, e.g. `1793897909-7de0b7` | **not** an integer; stored in `push_sent_events.event_id` as `VARCHAR(64)` (migration v6) |
+| `camera_id` | string | |
+| `label` | string | |
+| `max_score` | float | **not** `score` |
+| `start_ts` / `end_ts` | datetime | |
+
+Migration **v6** is a forward `ALTER` for installs that already applied empty v5 tables
+(`event_id BIGINT` → `VARCHAR(64)`). The webhook also accepts `max_score` (preferred) or
+`score` as an alias.
 
 ### Recommended companion change (cams-detect)
 
@@ -101,11 +118,11 @@ x-cams-push-secret: <contents of secrets/push_webhook_secret>
 Content-Type: application/json
 
 {
-  "id": 12345,
+  "id": "1793897909-7de0b7",
   "camera_id": "front-door",
   "camera_name": "Front Door",
   "label": "person",
-  "score": 0.91,
+  "max_score": 0.91,
   "start_ts": 1730000000.0,
   "end_ts": null
 }
