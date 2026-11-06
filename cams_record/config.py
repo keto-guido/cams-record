@@ -77,6 +77,10 @@ DEFAULTS: dict[str, Any] = {
         "roles": ["admin"],  # legacy setting; non-clip API routes always require admin
         "leeway_seconds": 30,
     },
+    "access": {
+        "enforce": True,  # false turns off per-camera checks (docs/camera-access.md)
+        "registry_file": "/apphub-data/cams.json",  # App Hub's registry; bind its directory, not the file
+    },
     "db": {
         "host": "127.0.0.1",
         "port": 3306,
@@ -99,6 +103,8 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DETECTION_PROTECTION_INTERVAL_S": (("detection_protection", "interval_s"), float),
     "DETECTION_PROTECTION_DAYS": (("detection_protection", "days"), float),
     "AUTH_APP_ID": (("auth", "app_id"), str),
+    "ACCESS_ENFORCE": (("access", "enforce"), bool),
+    "ACCESS_REGISTRY_FILE": (("access", "registry_file"), str),
     "LOG_LEVEL": (("log_level",), str),
     "BASE_PATH": (("base_path",), str),
     "HTTP_HOST": (("http", "host"), str),
@@ -274,6 +280,10 @@ def validate(cfg: dict) -> dict:
     cfg["base_path"] = normalize_base_path(cfg.get("base_path"))
     if cfg["auth"]["mode"] not in ("jwt", "none"):
         raise ValueError("auth.mode must be 'jwt' or 'none'")
+    if not isinstance(cfg["access"]["enforce"], bool):
+        raise ValueError("access.enforce must be true or false")
+    if cfg["access"]["enforce"] and not cfg["access"]["registry_file"]:
+        raise ValueError("access.registry_file is required while access.enforce is true")
     rec = cfg["recording"]
     if int(rec["segment_time"]) < 2:
         raise ValueError("recording.segment_time must be >= 2 seconds")

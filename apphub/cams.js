@@ -2,35 +2,61 @@
 // Cameras page (/cams/). Access is enforced by server.js (app "cams" ACL, 404 otherwise) before handle() runs.
 // Live view: MPEG-TS HLS (go2rtc's fMP4 HLS segments fail native HLS demuxers) for Safari/iOS, fMP4 progressive for desktop.
 // The browser only sees opaque camera ids; RTSP URLs/credentials live in /volume1/docker/cams/go2rtc.yaml (root 600).
+// Per-camera access: every route below goes through `access`, keyed on the session user. Client x-apphub-* headers
+// reach this module unstripped, so they are never read. A camera the user may not see answers exactly like an unknown one.
 const http = require('http'), fs = require('fs'), path = require('path');
 const G = { host: '127.0.0.1', port: 1984 };
 const CFG = path.join(require('./lib').DIR, 'cams.json');
-const ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const SID_TTL = 120e3, SID_MAX = 1000;
 module.exports = function (C) {
   const { esc, send, page, notFound } = C;
-  let cams = [];
-  const load = () => { try { cams = JSON.parse(fs.readFileSync(CFG, 'utf8')).filter(c => c && ID.test(c.id) && c.name && (!c.snap || ID.test(c.snap))); } catch (e) { console.error('cams.json:', e.message); } };
-  load(); setInterval(load, 30e3).unref();
+  const access = C.cameras || require('./camera_acl').fileAccess(CFG), RECHECK = C.recheckMs || 15e3;
+  const streamHeaders = type => ({ 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'x-accel-buffering': 'no' });
   const CSP = "default-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
   const snaps = new Map(); // id -> {t, buf, waiters}
-  function upstream(res, gpath, type, timeout) {
+  // still(): checked periodically, so a revocation also cuts a connection that is already open.
+  function upstream(res, gpath, type, timeout, still) {
     const up = http.get({ ...G, path: gpath }, ur => {
       if (ur.statusCode !== 200) { ur.resume(); return send(res, 502, 'camera unavailable', 'text/plain'); }
-      res.writeHead(200, { 'Content-Type': type || ur.headers['content-type'] || 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'x-accel-buffering': 'no' });
+      res.writeHead(200, streamHeaders(type || ur.headers['content-type'] || 'application/octet-stream'));
       ur.pipe(res);
     });
     up.setTimeout(timeout || 30e3, () => up.destroy(new Error('timeout')));
     up.on('error', () => { if (!res.headersSent) send(res, 502, 'camera unavailable', 'text/plain'); else res.destroy(); });
+    const watch = still && setInterval(() => { if (!still()) res.destroy(); }, RECHECK);
+    if (watch) watch.unref();
+    res.on('close', () => { clearInterval(watch); up.destroy(); });
+  }
+  // go2rtc's HLS session ids are not tied to a camera, so record whose session each one is: without this,
+  // access to one camera plus another camera's session id would reach the other camera's segments.
+  const sids = new Map(); // sid -> {cam, t}
+  setInterval(() => { const c = Date.now() - SID_TTL; for (const [k, v] of sids) if (v.t < c) sids.delete(k); }, 30e3).unref();
+  function hlsIndex(res, id) {
+    const up = http.get({ ...G, path: `/api/stream.m3u8?src=${id}` }, ur => {
+      if (ur.statusCode !== 200) { ur.resume(); return send(res, 502, 'camera unavailable', 'text/plain'); }
+      const a = [];
+      ur.on('data', d => a.push(d));
+      ur.on('end', () => {
+        const body = Buffer.concat(a);
+        for (const m of body.toString().matchAll(/[?&]id=([A-Za-z0-9_-]{1,64})/g)) {
+          if (sids.size >= SID_MAX) sids.delete(sids.keys().next().value);
+          sids.set(m[1], { cam: id, t: Date.now() });
+        }
+        res.writeHead(200, streamHeaders('application/vnd.apple.mpegurl')); res.end(body);
+      });
+    });
+    up.setTimeout(30e3, () => up.destroy(new Error('timeout')));
+    up.on('error', () => { if (!res.headersSent) send(res, 502, 'camera unavailable', 'text/plain'); else res.destroy(); });
     res.on('close', () => up.destroy());
   }
-  function snap(res, id) {
+  function snap(res, id, src) {
     const c = snaps.get(id) || {}; snaps.set(id, c);
     const out = b => b ? send(res, 200, b, 'image/jpeg') : send(res, 502, 'camera unavailable', 'text/plain');
     if (c.buf && Date.now() - c.t < 3000) return out(c.buf);
     if (c.waiters) return c.waiters.push(out);
     c.waiters = [out];
     const done = b => { const w = c.waiters; c.waiters = null; if (b) { c.buf = b; c.t = Date.now(); } w.forEach(f => f(b || null)); };
-    const up = http.get({ ...G, path: '/api/frame.jpeg?src=' + ((cams.find(x => x.id === id) || {}).snap || id) }, ur => { const a = []; ur.on('data', d => a.push(d)); ur.on('end', () => done(ur.statusCode === 200 ? Buffer.concat(a) : null)); });
+    const up = http.get({ ...G, path: '/api/frame.jpeg?src=' + src }, ur => { const a = []; ur.on('data', d => a.push(d)); ur.on('end', () => done(ur.statusCode === 200 ? Buffer.concat(a) : null)); });
     up.setTimeout(15e3, () => up.destroy(new Error('timeout'))); up.on('error', () => done(null));
   }
   // go2rtc hands out each HLS segment/init only once; players (Safari, Chrome) often re-request the same one,
@@ -49,6 +75,7 @@ module.exports = function (C) {
     up.setTimeout(30e3, () => up.destroy(new Error('timeout'))); up.on('error', () => done(null));
   }
   function html(s) {
+    const cams = access.list(s.user);
     return page('Cameras · MERSINO NETWORK', `<nav class="mn-subnav cams-tabs" id="cams-tabs" aria-label="Sections"><a class="cams-tab" data-view="grid" href="#">Live</a><a class="cams-tab" data-view="det" href="#detections">Detections</a></nav>
 <main class="wrap"><section id="view-grid"><p class="muted sm">Snapshots refresh every few seconds. Tap a camera to open it.</p><div class="camgrid" id="camgrid">${cams.map(c => `<button type="button" class="camtile" data-id="${esc(c.id)}" data-cam="${esc(c.id)}" data-name="${esc(c.name)}"><img alt="${esc(c.name)} snapshot" src="/cams/api/snap/${esc(c.id)}"><span class="camname">${esc(c.name)}</span><span class="camage muted sm"></span></button>`).join('') || '<p class="muted">No cameras configured.</p>'}</div></section>
 <section id="view-det" hidden><div class="cd-filters"><select id="det-cam" aria-label="Camera"><option value="">All cameras</option></select><select id="det-label" aria-label="Label"><option value="">All labels</option><option value="person">Person</option><option value="car">Car</option><option value="dog">Dog</option><option value="cat">Cat</option></select></div><div class="cd-rows" id="det-list"></div><button type="button" class="ghost cd-more" id="det-more" hidden>Load more</button></section>
@@ -64,15 +91,18 @@ module.exports = function (C) {
     if (p === '/cams/') return send(res, 200, html(s), 'text/html; charset=utf-8', { 'Content-Security-Policy': CSP });
     let m;
     if ((m = p.match(/^\/cams\/static\/(cams\.js|cams\.css|hls\.min\.js)$/))) return fs.readFile(path.join(__dirname, 'static', m[1]), (e, d) => e ? notFound(res) : send(res, 200, d, STAT[m[1]], { 'Cache-Control': m[1] === 'hls.min.js' ? 'private, max-age=86400' : 'private, max-age=3600' }));
-    if (p === '/cams/api/list') return send(res, 200, JSON.stringify(cams.map(({ id, name }) => ({ id, name }))), 'application/json');
-    const known = id => cams.some(c => c.id === id);
-    if ((m = p.match(/^\/cams\/api\/snap\/([^/]+)$/)) && known(m[1])) return snap(res, m[1]);
-    if ((m = p.match(/^\/cams\/api\/stream\/([^/]+)\/(.+)$/)) && known(m[1])) {
-      const id = m[1], rest = m[2];
-      if (rest === 'index.m3u8') return upstream(res, `/api/stream.m3u8?src=${id}`, 'application/vnd.apple.mpegurl');
-      if (rest === 'live.mp4') return upstream(res, `/api/stream.mp4?src=${id}`, 'video/mp4', 0);
-      const hm = rest.match(/^hls\/(playlist\.m3u8|segment\.m4s|segment\.ts|init\.mp4)$/), sid = u.searchParams.get('id') || '', n = u.searchParams.get('n');
-      if (hm && /^[A-Za-z0-9_-]{1,64}$/.test(sid) && (n == null || /^\d{1,9}$/.test(n))) {
+    if (p === '/cams/api/list') return send(res, 200, JSON.stringify(access.list(s.user).map(({ id, name }) => ({ id, name }))), 'application/json');
+    if ((m = p.match(/^\/cams\/api\/snap\/([^/]+)$/))) {
+      const cam = access.get(s.user, m[1]), src = cam && (cam.snap || cam.id);
+      if (cam && access.canStream(s.user, src)) return snap(res, cam.id, src);
+    }
+    if ((m = p.match(/^\/cams\/api\/stream\/([^/]+)\/(.+)$/)) && access.get(s.user, m[1]) && access.canStream(s.user, m[1])) {
+      const id = m[1], rest = m[2], still = () => access.canStream(s.user, id);
+      if (rest === 'index.m3u8') return hlsIndex(res, id);
+      if (rest === 'live.mp4') return upstream(res, `/api/stream.mp4?src=${id}`, 'video/mp4', 0, still);
+      const hm = rest.match(/^hls\/(playlist\.m3u8|segment\.m4s|segment\.ts|init\.mp4)$/), sid = u.searchParams.get('id') || '', n = u.searchParams.get('n'), owner = sids.get(sid);
+      if (hm && owner && owner.cam === id && (n == null || /^\d{1,9}$/.test(n))) {
+        owner.t = Date.now();
         const gp = `/api/hls/${hm[1]}?id=${sid}${n != null ? '&n=' + n : ''}`;
         return hm[1] === 'playlist.m3u8' ? upstream(res, gp, 'application/vnd.apple.mpegurl') : seg(res, gp, hm[1] === 'segment.ts' ? 'video/mp2t' : 'video/mp4');
       }

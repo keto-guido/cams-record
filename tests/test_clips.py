@@ -53,7 +53,7 @@ def setup(tmp_path):
     root = tmp_path / "nvr"
     root.mkdir()
     (root / "a.mp4").write_bytes(b"segment")
-    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)},
+    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)}, "access": {"enforce": False},
                               "recording": {"root": str(root), "state_dir": str(tmp_path / "state")}})
     db = Mock()
     db.clip_segments.return_value = ([seg()], 60)

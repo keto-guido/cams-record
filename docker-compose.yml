@@ -19,6 +19,8 @@ services:
     volumes:
       - /volume1/nvr:/volume1/nvr
       - ./config:/config:ro
+      # The directory, not cams.json itself: the hub saves by atomic rename, which a file mount would miss.
+      - ${APPHUB_DATA_DIR:?set APPHUB_DATA_DIR to the App Hub directory holding cams.json}:/apphub-data:ro
     secrets:
       - db_password
       - apphub_jwt

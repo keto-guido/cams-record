@@ -498,6 +498,13 @@ the file, retention budgets count files once, and clip selection uses each path
 once. Run only one recorder/indexer writer per recording root/database; path
 deduplication is serialized in that writer, rather than enforced by a unique key.
 
+## Per-camera access
+
+Every camera route checks App Hub's `cams.json` as well as the JWT role: a camera the user may
+not see answers exactly like an unknown one, with a 404. `docker-compose.yml` needs
+`APPHUB_DATA_DIR` set to the directory holding `cams.json`. Rules, configuration and rollout
+order are in [docs/camera-access.md](docs/camera-access.md).
+
 ## Timeline, playback and range exports (Phase 3)
 
 All routes below accept the same App Hub `admin` or `cams` JWT as `/api/clip`.
