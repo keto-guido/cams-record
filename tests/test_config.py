@@ -117,3 +117,21 @@ def test_invalid_retention(tmp_path, ret):
     write(tmp_path, {}, {"retention": ret})
     with pytest.raises(ValueError):
         load_config(tmp_path, env={})
+
+
+def test_camera_warnings_do_not_change_behaviour(caplog):
+    from cams_record.config import parse_cameras
+
+    data = {"cameras": {
+        "front-door": {"main_stream": "front-door-main", "sub_stream": "front-door"},
+        "garage": {"sub_stream": "garage"},  # main defaults to the id = the sub stream
+        "back_yard": {"main_stream": "back_yard-main"},
+    }}
+    with caplog.at_level("WARNING"):
+        cams = parse_cameras(data)
+    assert cams["garage"].streams() == [("main", "garage"), ("sub", "garage")]  # unchanged
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("front-door" in m for m in msgs)
+    assert any("garage: main_stream is not set" in m for m in msgs)
+    assert any("garage: main_stream and sub_stream are both 'garage'" in m for m in msgs)
+    assert any("back_yard: id is not valid in the App Hub camera registry" in m for m in msgs)

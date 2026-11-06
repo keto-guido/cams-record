@@ -30,6 +30,8 @@ import yaml
 log = logging.getLogger(__name__)
 
 CAMERA_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Ids App Hub's cams.json accepts (docs/camera-access.md); ids outside it still load but nobody can view them.
+REGISTRY_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 QUALITIES = ("main", "sub")
 
 DEFAULTS: dict[str, Any] = {
@@ -276,11 +278,30 @@ def _read_yaml(path: Path) -> dict:
     return data
 
 
+def camera_warnings(cam: CameraConfig, raw: dict | None) -> list[str]:
+    """Settings that load but are probably not what was meant. Behaviour is unchanged; these are logged."""
+    out = []
+    if not REGISTRY_ID_RE.match(cam.id):
+        out.append(f"camera {cam.id}: id is not valid in the App Hub camera registry (a-z, 0-9 and '-', not "
+                   "starting or ending with '-'); the registry drops it, so nobody can view its recordings")
+    if not (raw or {}).get("main_stream"):
+        out.append(f"camera {cam.id}: main_stream is not set, so stream '{cam.main_stream}' is recorded as main "
+                   f"(cams-detect defaults the high-resolution stream to '{cam.id}-main'); set main_stream explicitly")
+    if cam.sub_stream and cam.sub_stream == cam.main_stream and cam.record_main and cam.record_sub:
+        out.append(f"camera {cam.id}: main_stream and sub_stream are both '{cam.main_stream}', "
+                   "so the same stream is recorded twice")
+    return out
+
+
 def parse_cameras(data: dict) -> dict[str, CameraConfig]:
     raw = data.get("cameras") or {}
     if not isinstance(raw, dict):
         raise ValueError("cameras.yaml: 'cameras' must be a mapping of id -> settings")
-    return {str(cid): resolve_camera(str(cid), r) for cid, r in raw.items()}
+    cams = {str(cid): resolve_camera(str(cid), r) for cid, r in raw.items()}
+    for cid, cam in cams.items():
+        for msg in camera_warnings(cam, raw.get(cid)):
+            log.warning("%s", msg)
+    return cams
 
 
 def _positive(name: str, value: Any) -> None:
