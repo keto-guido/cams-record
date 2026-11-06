@@ -216,7 +216,8 @@ def create_app(service, cfg: dict):
         stamp = datetime.fromtimestamp(start, zone).strftime("%Y%m%d-%H%M%S")
         stop = datetime.fromtimestamp(end, zone).strftime("%H%M%S")
         return CleanupFileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{stop}_{quality}.mp4",
-                                   headers={"X-Export-Quality": quality}, cleanup=finish)
+                                   headers={"Cache-Control": "private, no-store", "X-Export-Quality": quality},
+                                   cleanup=finish)
 
     @r.get("/api/clip/info")
     def clip_info(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",

@@ -198,6 +198,7 @@ def test_export_limits_fallback_cleanup_busy(setup, monkeypatch):
     r = client.get('/api/export?cam=cam&start=10&end=40', headers=HEADERS)
     assert r.status_code == 200
     assert r.headers['x-export-quality'] == 'sub'
+    assert r.headers['cache-control'] == 'private, no-store'
     assert 'attachment' in r.headers['content-disposition']
     assert not list((Path(cfg['recording']['state_dir']) / 'exports').glob('*.mp4'))
     media = client.app.app.state.media
