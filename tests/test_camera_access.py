@@ -201,6 +201,55 @@ def test_revocation_applies_to_the_next_request(setup):
     assert client.get(url, headers=headers("ann")).status_code == 404
 
 
+def test_cached_clip_ranges_reauthorize_every_request(setup, monkeypatch):
+    db, registry, client = setup
+
+    def run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"0123456789")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("cams_record.clips.subprocess.run", run)
+    url = "/api/clip?camera=private&start=10&end=40"
+    first = client.get(url, headers=headers("ann") | {"Range": "bytes=0-1"})
+    assert first.status_code == 206
+    continuation = {"Range": "bytes=2-", "If-Range": first.headers["etag"]}
+    assert client.get(url, headers=headers("ann") | continuation).content == b"23456789"
+    db.reset_mock()
+    assert client.get(url, headers=continuation).status_code == 401
+    assert client.get(url, headers=headers("ann", ["viewer"]) | continuation).status_code == 403
+    assert client.get(url, headers=headers("ann") | continuation |
+                      {"x-apphub-token": tok(["cams"], exp=-120, sub="ann")}).status_code == 401
+    assert client.get(url, headers=headers("bob") | continuation).status_code == 404
+    assert not touched(db)
+    registry.write_text(json.dumps([{"id": "private", "name": "Revoked", "users": ["zed"]}]))
+    assert client.get(url, headers=headers("ann") | continuation).status_code == 404
+    assert not touched(db)
+
+
+def test_push_event_context_checks_camera_and_revocation(setup):
+    db, registry, client = setup
+    db.detection_event_by_id.return_value = {
+        "id": "event-123", "camera_id": "private", "label": "person", "score": 0.9,
+        "start_ts": 10, "end_ts": 20,
+    }
+    url = "/api/push/event-context/event-123"
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers=headers("ann", ["viewer"])).status_code == 403
+    response = client.get(url, headers=headers("ann"))
+    assert response.status_code == 200
+    assert response.json()["camera"] == "private"
+    assert client.get(url, headers=headers("root", ["admin"])).status_code == 200
+    denied = client.get(url, headers=headers("bob"))
+    assert denied.status_code == 404
+    assert denied.json() == {"detail": "event not found"}
+    assert client.get(url, headers=headers("ann") | {"x-apphub-user": "bob"}).status_code == 404
+    registry.write_text(json.dumps([{"id": "private", "name": "Revoked", "users": ["zed"]}]))
+    assert client.get(url, headers=headers("ann")).status_code == 404
+    db.detection_event_by_id.return_value = None
+    missing = client.get(url, headers=headers("bob"))
+    assert missing.status_code == denied.status_code and missing.json() == denied.json()
+
+
 def test_missing_registry_denies_even_admin(setup):
     _, registry, client = setup
     registry.unlink()

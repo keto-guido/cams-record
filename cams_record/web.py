@@ -231,6 +231,7 @@ def create_app(service, cfg: dict):
         path = clips.build(camera, quality, start, end, lease=True)
         stamp = datetime.fromtimestamp(start, ZoneInfo(cfg["clips"]["timezone"])).strftime("%Y%m%d-%H%M%S")
         return FileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{quality}.mp4",
+                            headers={"Cache-Control": "private, no-store"},
                             content_disposition_type="attachment" if download == "1" else "inline",
                             background=BackgroundTask(path.unlink, missing_ok=True))
 
@@ -308,7 +309,7 @@ def create_app(service, cfg: dict):
             raise HTTPException(exc.status, exc.detail) from exc
 
     @r.get("/api/push/event-context/{event_id}")
-    def push_event_context(event_id: str, _: Principal = Depends(clip_user)):
+    def push_event_context(event_id: str, who: Viewer = Depends(viewer)):
         """Authorized deep-link helper: metadata only (no snapshots/images)."""
         try:
             eid = normalize_event_id(event_id)
@@ -320,7 +321,7 @@ def create_app(service, cfg: dict):
             row = service.db.detection_event_by_id(eid)
         except DBUnavailable as exc:
             raise HTTPException(503, "database unavailable") from exc
-        if not row:
+        if not row or (access.enforce and not access.allowed(row["camera_id"], who)):
             raise HTTPException(404, "event not found")
         from urllib.parse import quote
 
