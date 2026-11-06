@@ -89,7 +89,7 @@ def test_playback_boundary_overlap(setup, timestamps, tolerance):
     durations = [b - a for a, b in timestamps]
     assert [e['duration'] for e in entries] == pytest.approx(durations)
     assert [e['offset'] for e in entries] == pytest.approx([0, durations[0], sum(durations[:2])])
-    assert all(a['end'] - b['start'] <= tolerance for a, b in zip(entries, entries[1:]))
+    assert all(a['end'] - b['start'] <= tolerance for a, b in zip(entries, entries[1:], strict=False))
     response = client.get('/api/hls/cam/index.m3u8', params=params, headers=HEADERS)
     assert response.status_code == 200
     assert response.text.count('#EXTINF:') == 3

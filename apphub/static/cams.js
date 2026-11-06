@@ -461,9 +461,183 @@
   window.addEventListener('pagehide',timelineStop);
 
 
+  // ---------- Web Push notification control ----------
+  // iPhone/iPad only expose Notification + Push after the PWA is added to the Home Screen (standalone).
+  // Safari in a normal browser tab cannot subscribe; the UI must say so explicitly.
+  const CR_PUSH = CR + '/api/push';
+  const pushBar = $('push-bar'), pushStatus = $('push-status'), pushToggle = $('push-toggle'), pushTest = $('push-test');
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  const isIOS = IOS;
+  function b64ToUint8(b64) {
+    const pad = '='.repeat((4 - (b64.length % 4)) % 4), raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    const out = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out;
+  }
+  function pushExplain() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { state: 'unsupported', text: isIOS && !isStandalone()
+        ? 'On iPhone, add Cameras to your Home Screen first. Open that Home Screen app, then you can enable detection alerts. Safari in a normal tab cannot receive Web Push.'
+        : 'This browser does not support Web Push notifications.' };
+    }
+    if (isIOS && !isStandalone()) {
+      return { state: 'ios-browser', text: 'On iPhone/iPad, detection alerts require the Cameras app on your Home Screen (Share → Add to Home Screen). Open that app — not Safari in a tab — then tap Enable.' };
+    }
+    if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+      return { state: 'denied', text: 'Notification permission is blocked for this app. Enable it in system Settings, then return here.' };
+    }
+    return { state: 'ready', text: '' };
+  }
+  async function pushJson(url, opts) {
+    const r = await fetch(url, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(opts && opts.headers) }, ...opts });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.detail || ('Request failed (' + r.status + ')'));
+    return body;
+  }
+  async function ensurePushWorker() {
+    const reg = await navigator.serviceWorker.register('/cams/sw.js', { scope: '/cams/' });
+    await navigator.serviceWorker.ready;
+    return reg;
+  }
+  async function currentSubscription(reg) {
+    return reg.pushManager.getSubscription();
+  }
+  async function refreshPushUi() {
+    if (!pushBar) return;
+    pushBar.hidden = false;
+    const info = pushExplain();
+    pushTest.hidden = true;
+    if (info.state !== 'ready') {
+      pushStatus.textContent = info.text;
+      pushToggle.hidden = info.state === 'unsupported' || info.state === 'denied';
+      pushToggle.textContent = 'Enable';
+      pushToggle.disabled = info.state !== 'ios-browser' ? info.state !== 'ready' : true;
+      if (info.state === 'ios-browser') { pushToggle.hidden = true; }
+      return;
+    }
+    try {
+      const st = await pushJson(CR_PUSH + '/status');
+      if (!st.configured) {
+        pushStatus.textContent = 'Detection alerts are not configured on the server yet.';
+        pushToggle.hidden = true;
+        return;
+      }
+      const reg = await ensurePushWorker();
+      const sub = await currentSubscription(reg);
+      const on = !!sub;
+      pushStatus.textContent = on ? 'Detection alerts are on for this device.' : 'Detection alerts are off on this device.';
+      pushToggle.hidden = false;
+      pushToggle.disabled = false;
+      pushToggle.textContent = on ? 'Disable' : 'Enable';
+      pushTest.hidden = !on;
+    } catch (e) {
+      pushStatus.textContent = 'Could not check alert status. ' + (e.message || '');
+      pushToggle.hidden = true;
+    }
+  }
+  async function enablePush() {
+    const info = pushExplain();
+    if (info.state !== 'ready') { pushStatus.textContent = info.text; return; }
+    pushToggle.disabled = true;
+    try {
+      const reg = await ensurePushWorker();
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') {
+        pushStatus.textContent = perm === 'denied'
+          ? 'Notification permission is blocked for this app. Enable it in system Settings, then return here.'
+          : 'Permission was not granted, so alerts stay off.';
+        return;
+      }
+      const { publicKey } = await pushJson(CR_PUSH + '/vapid-public-key');
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToUint8(publicKey) });
+      const json = sub.toJSON();
+      await pushJson(CR_PUSH + '/subscribe', { method: 'POST', body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, user_agent: navigator.userAgent }) });
+      pushStatus.textContent = 'Detection alerts are on for this device.';
+    } catch (e) {
+      pushStatus.textContent = e.message || 'Could not enable alerts.';
+    } finally {
+      await refreshPushUi();
+    }
+  }
+  async function disablePush() {
+    pushToggle.disabled = true;
+    try {
+      const reg = await ensurePushWorker();
+      const sub = await currentSubscription(reg);
+      if (sub) {
+        const endpoint = sub.endpoint;
+        try { await sub.unsubscribe(); } catch (e) {}
+        await pushJson(CR_PUSH + '/subscribe?endpoint=' + encodeURIComponent(endpoint), {
+          method: 'DELETE', body: JSON.stringify({ endpoint }),
+        }).catch(() => {});
+      }
+      pushStatus.textContent = 'Detection alerts are off on this device.';
+    } catch (e) {
+      pushStatus.textContent = e.message || 'Could not disable alerts.';
+    } finally {
+      await refreshPushUi();
+    }
+  }
+  if (pushToggle) pushToggle.addEventListener('click', () => {
+    if (pushToggle.textContent === 'Disable') disablePush(); else enablePush();
+  });
+  if (pushTest) pushTest.addEventListener('click', async () => {
+    pushTest.disabled = true;
+    try {
+      await pushJson(CR_PUSH + '/test', { method: 'POST', body: '{}' });
+      pushStatus.textContent = 'Test notification sent. If nothing appears, check Focus/Do Not Disturb.';
+    } catch (e) {
+      pushStatus.textContent = e.message || 'Test failed.';
+    } finally {
+      pushTest.disabled = false;
+      setTimeout(refreshPushUi, 1500);
+    }
+  });
+  navigator.serviceWorker && navigator.serviceWorker.addEventListener('message', ev => {
+    const msg = ev.data || {};
+    if (msg.type === 'cams-push-open' && msg.url) {
+      const hash = String(msg.url).split('#')[1];
+      if (hash != null) location.hash = hash;
+    }
+  });
+  refreshPushUi();
+
+  // ---------- deep-link: #event=<id> opens the authorized detection lightbox ----------
+  let openingEvent = null;
+  async function openEventId(id) {
+    const n = Number(id);
+    if (!Number.isFinite(n) || n < 1 || openingEvent === n) return;
+    openingEvent = n;
+    try {
+      let ev = null;
+      try {
+        const ctx = await pushJson(CR_PUSH + '/event-context/' + n);
+        ev = {
+          id: ctx.id,
+          camera: ctx.camera_id || ctx.camera,
+          camera_name: detName[ctx.camera_id || ctx.camera] || ctx.camera_id || ctx.camera,
+          label: ctx.label || 'detection',
+          score: ctx.score,
+          start_ts: ctx.start_ts,
+          end_ts: ctx.end_ts,
+          has_snapshot: true,
+          has_snapshot_hires: true,
+        };
+      } catch (e) {
+        const list = await fetch(CD + '/api/events?limit=50', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []);
+        ev = (list || []).find(x => String(x.id) === String(n)) || null;
+      }
+      if (!ev) { if (pushStatus) pushStatus.textContent = 'That detection is no longer available.'; return; }
+      await cdReady;
+      lbOpen(ev);
+    } finally {
+      openingEvent = null;
+    }
+  }
+
   // ---------- routing ----------
   function parse() {
     const h = location.hash.replace(/^#/, '');
+    const ev = h.match(/^event=(\d+)$/);
+    if (ev) return { view: 'event', eventId: ev[1] };
     if (h === 'detections') return { view: 'det' };
     const m = h.match(/^cam=([a-z0-9][a-z0-9-]{0,31})$/);
     if (m && hubCams.some(c => c.id === m[1])) return { view: 'cam', id: m[1] };
@@ -471,6 +645,11 @@
   }
   function show() {
     const prev = route; route = parse();
+    if (route.view === 'event') {
+      openEventId(route.eventId);
+      // Keep grid visible underneath while the lightbox opens.
+      route = { view: 'grid' };
+    }
     if (prev.view === 'cam' && (route.view !== 'cam' || route.id !== prev.id)) { liveStop(); timelineStop(); }
     $('view-grid').hidden = route.view !== 'grid'; $('view-det').hidden = route.view !== 'det'; $('view-cam').hidden = route.view !== 'cam';
     $('cams-tabs').hidden = route.view === 'cam';

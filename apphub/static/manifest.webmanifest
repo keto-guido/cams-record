@@ -1,0 +1,24 @@
+{
+  "name": "Cameras · MERSINO NETWORK",
+  "short_name": "Cameras",
+  "description": "MERSINO NETWORK camera live view and detections",
+  "start_url": "/cams/",
+  "scope": "/cams/",
+  "display": "standalone",
+  "background_color": "#121417",
+  "theme_color": "#1a5fb4",
+  "icons": [
+    {
+      "src": "/cams/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/cams/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
