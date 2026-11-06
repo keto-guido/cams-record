@@ -75,9 +75,32 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
     ]),
     (3, ["ALTER TABLE segments ADD COLUMN IF NOT EXISTS protected_until DATETIME NULL"]),
     (4, ["ALTER TABLE segments ADD KEY IF NOT EXISTS idx_segments_path_id (path, id)"]),
+    (5, [
+        """CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            user_sub VARCHAR(128) NOT NULL,
+            endpoint VARCHAR(2048) NOT NULL,
+            endpoint_hash CHAR(64) NOT NULL,
+            p256dh VARCHAR(255) NOT NULL,
+            auth VARCHAR(255) NOT NULL,
+            user_agent VARCHAR(512) NULL,
+            created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+            last_success_at DATETIME(3) NULL,
+            UNIQUE KEY uq_push_endpoint_hash (endpoint_hash),
+            KEY idx_push_user (user_sub)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+        """CREATE TABLE IF NOT EXISTS push_sent_events (
+            event_id BIGINT NOT NULL PRIMARY KEY,
+            camera_id VARCHAR(64) NOT NULL,
+            sent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            KEY idx_push_sent_at (sent_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    ]),
 ]
 
-TABLES = ("segments", "recorder_status", "recorder_cameras", "schema_version")
+TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions",
+          "push_sent_events", "schema_version")
 
 
 class Database:
@@ -294,6 +317,84 @@ class Database:
                            WHERE updated_at >= %s OR start_ts >= %s""", (to_dt(since), to_dt(since)))
             return [{"camera_id": r[0], "start_ts": from_dt(r[1]), "end_ts": from_dt(r[2])}
                     for r in cur.fetchall()]
+        return self.run(q)
+
+    def detection_events_for_push(self, since: float, limit: int = 200) -> list[dict]:
+        """Recent cams_detect events that have not yet been claimed for Web Push."""
+        def q(cur):
+            cur.execute("""SELECT e.id, e.camera_id, e.label, e.score, e.start_ts, e.end_ts
+                           FROM cams_detect.events e
+                           LEFT JOIN push_sent_events s ON s.event_id = e.id
+                           WHERE s.event_id IS NULL AND e.start_ts >= %s
+                           ORDER BY e.id ASC LIMIT %s""", (to_dt(since), int(limit)))
+            return [{"id": int(r[0]), "camera_id": r[1], "label": r[2],
+                     "score": float(r[3]) if r[3] is not None else None,
+                     "start_ts": from_dt(r[4]),
+                     "end_ts": from_dt(r[5]) if r[5] is not None else None}
+                    for r in cur.fetchall()]
+        return self.run(q)
+
+    def detection_event_by_id(self, event_id: int) -> dict | None:
+        def q(cur):
+            cur.execute("""SELECT id, camera_id, label, score, start_ts, end_ts
+                           FROM cams_detect.events WHERE id=%s""", (int(event_id),))
+            r = cur.fetchone()
+            if not r:
+                return None
+            return {"id": int(r[0]), "camera_id": r[1], "label": r[2],
+                    "score": float(r[3]) if r[3] is not None else None,
+                    "start_ts": from_dt(r[4]),
+                    "end_ts": from_dt(r[5]) if r[5] is not None else None}
+        return self.run(q)
+
+    def upsert_push_subscription(self, user_sub: str, sub: dict) -> None:
+        self.run(lambda cur: cur.execute(
+            """INSERT INTO push_subscriptions
+               (user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON DUPLICATE KEY UPDATE user_sub=VALUES(user_sub), endpoint=VALUES(endpoint),
+                 p256dh=VALUES(p256dh), auth=VALUES(auth),
+                 user_agent=COALESCE(VALUES(user_agent), user_agent)""",
+            (user_sub, sub["endpoint"], sub["endpoint_hash"], sub["p256dh"], sub["auth"],
+             sub.get("user_agent"))))
+
+    def delete_push_subscription(self, user_sub: str, endpoint_hash: str) -> int:
+        return self.run(lambda cur: cur.execute(
+            "DELETE FROM push_subscriptions WHERE user_sub=%s AND endpoint_hash=%s",
+            (user_sub, endpoint_hash)))
+
+    def delete_push_endpoint(self, endpoint_hash: str) -> int:
+        return self.run(lambda cur: cur.execute(
+            "DELETE FROM push_subscriptions WHERE endpoint_hash=%s", (endpoint_hash,)))
+
+    def touch_push_subscription(self, endpoint_hash: str) -> None:
+        self.run(lambda cur: cur.execute(
+            "UPDATE push_subscriptions SET last_success_at=UTC_TIMESTAMP(3) WHERE endpoint_hash=%s",
+            (endpoint_hash,)))
+
+    def push_subscriptions_for_user(self, user_sub: str) -> list[dict]:
+        def q(cur):
+            cur.execute("""SELECT user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent
+                           FROM push_subscriptions WHERE user_sub=%s""", (user_sub,))
+            return [dict(zip(("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent"),
+                             r, strict=True)) for r in cur.fetchall()]
+        return self.run(q)
+
+    def list_push_subscriptions(self) -> list[dict]:
+        def q(cur):
+            cur.execute("""SELECT user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent
+                           FROM push_subscriptions""")
+            return [dict(zip(("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent"),
+                             r, strict=True)) for r in cur.fetchall()]
+        return self.run(q)
+
+    def claim_push_event(self, event_id: int, camera_id: str) -> bool:
+        """Insert a send claim. Returns True when this caller won (should send)."""
+        def q(cur):
+            n = cur.execute(
+                "INSERT IGNORE INTO push_sent_events (event_id, camera_id) VALUES (%s, %s)",
+                (int(event_id), camera_id))
+            return n == 1
         return self.run(q)
 
     def protect_window(self, camera: str, start: float, end: float, until: float) -> int:

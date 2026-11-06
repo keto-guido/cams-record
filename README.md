@@ -37,6 +37,7 @@ writes 60 s MP4 segments from go2rtc, indexes them in the NAS's **MariaDB** and 
 - [Gap check SQL](#gap-check-sql)
 - [Rollback](#rollback)
 - [HTTP API](#http-api)
+- [Web Push detection alerts](#web-push-detection-alerts)
 - [Development](#development)
 
 ## Layout and timestamps
@@ -96,6 +97,7 @@ cameras:
 | `db.host` / `port` / `database` / `user` | `127.0.0.1` / `3306` / `cams_record` / `cams_record` | env `DB_HOST`, `DB_PORT`, … |
 | `db.password_file` | `/run/secrets/db_password` | |
 | `auth.secret_file` | `/run/secrets/apphub_jwt` | the App Hub's shared HS256 secret |
+| `push.*` | see [Web Push](#web-push-detection-alerts) | VAPID + subscription storage; private key from secrets |
 | `http.host` / `port` | `127.0.0.1` / `8097` | |
 | `base_path` | `/cams-record` | requests with or without the prefix both work |
 
@@ -184,6 +186,8 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | `recorder_cameras` | camera config mirror: `id` (= `cams_detect.cameras.camera_id`), streams, flags |
 | `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing, protected, protected_until, deleted_at` |
 | `recorder_status` | per (camera, quality): `state, last_segment_ts, restarts_24h, last_error` |
+| `push_subscriptions` | Web Push endpoints bound to App Hub JWT `sub` (schema v5) |
+| `push_sent_events` | detection `event_id` claim table to avoid duplicate alerts (schema v5) |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
 end_ts)`, `INDEX(end_ts)`, `INDEX(path)` and `INDEX(deleted_at, quality, start_ts)`. The path index
@@ -225,9 +229,21 @@ makes reconcile lookups cheap, and the last one serves the janitor. Queries of y
    cp ../cams-detect/secrets/apphub_jwt secrets/apphub_jwt
    ```
 
+   Generate Web Push VAPID material and a webhook secret on the NAS only (never commit):
+
+   ```bash
+   # See docs/web-push.md for the full generator snippet (py_vapid).
+   # Writes secrets/vapid_private_key (PEM) and prints the public applicationServerKey.
+   printf '%s' "$(openssl rand -hex 32)" > secrets/push_webhook_secret
+   ```
+
    ```bash
    chmod 600 secrets/*
    ```
+
+   Compose expects `secrets/vapid_private_key` and `secrets/push_webhook_secret` to exist
+   before `docker compose up`. Until the VAPID private key is present and readable, push
+   APIs return 503 and the poller stays idle.
 
 3. **Create the recording share/folder** `/volume1/nvr`. It is bind-mounted into the
    container at the same path:
@@ -366,6 +382,8 @@ These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is
 | `GET /healthz` | none | `{"ok": true}`; used by the Docker healthcheck |
 | `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile, `retention` (below) |
 | `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog, `cams_record_retention_*` |
+| `GET/POST/DELETE /api/push/*` | cams or admin JWT | Web Push subscribe/status/test/event-context; see [Web Push](#web-push-detection-alerts) |
+| `POST /api/internal/detection-event` | `x-cams-push-secret` | cams-detect webhook only; not a public send API |
 
 `retention` in `/api/status`:
 
@@ -386,6 +404,23 @@ App Hub secret (`/run/secrets/apphub_jwt`), with `exp` set, `aud: cams-record`, 
 ```bash
 curl -s -H "x-apphub-token: $TOKEN" http://127.0.0.1:8097/cams-record/api/status | jq
 ```
+
+## Web Push detection alerts
+
+The Cameras PWA can subscribe to **detection alerts** via Web Push (VAPID). Full setup,
+iOS Home Screen requirements, schema v5, and the cams-detect webhook contract are in
+[`docs/web-push.md`](docs/web-push.md).
+
+Summary:
+
+- **Frontend** (`apphub/`): service worker at `/cams/sw.js`, manifest, notification control
+  on the Live view (subscribe / unsubscribe / test), deep link `#event=<id>`.
+- **Backend** (`cams-record`): stores subscriptions per JWT `sub`, sends on new
+  `cams_detect.events` (poller and/or internal webhook), prunes 404/410 endpoints,
+  dedupes by `event_id`. Private VAPID key stays in `secrets/vapid_private_key`.
+- **iPhone**: alerts only work from the **installed** Home Screen PWA, not Safari tabs.
+- **Companion work**: deploy updated `apphub/` assets to App Hub; optionally teach
+  cams-detect to POST `/api/internal/detection-event` for lower latency (poller works alone).
 
 ## Development
 
