@@ -174,3 +174,8 @@ a.adm-row:hover,a.adm-row:focus-visible{border-color:var(--mn-accent);outline:no
 .adm-history{margin:0;padding:0;list-style:none;font-size:var(--mn-text-sm);color:var(--mn-text-muted)}
 .adm-history li{margin-bottom:var(--mn-space-1);overflow-wrap:anywhere}
 .adm-history strong{color:var(--mn-text);font-weight:600}
+
+/* ---------- detection type icon (right side of each detection row) ---------- */
+.cd-kind{flex:none;display:flex;align-items:center;justify-content:center;width:52px;height:52px;margin-left:auto;border-radius:50%;background:var(--mn-accent-soft);color:var(--mn-accent)}
+.cd-kind svg{width:30px;height:30px}
+@media (max-width:480px){.cd-kind{width:44px;height:44px}.cd-kind svg{width:26px;height:26px}}

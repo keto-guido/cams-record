@@ -20,8 +20,8 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=18'));
-assert(html.includes('cams.css?v=14'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=19'));
+assert(html.includes('cams.css?v=15'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
 assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
 assert(html.includes('apple-mobile-web-app-capable'));
@@ -54,6 +54,11 @@ assert(client.includes("ADM = CR + '/api/admin'") && client.includes('expect_rev
 assert(client.includes("'Content-Type': 'application/json'"));
 const adminPart = client.split('// ---------- camera management')[1].split('// ---------- routing')[0];
 assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(adminPart), 'admin view must use textContent only');
+// Detection rows: zoomed thumbnail with a fallback to the full snapshot, and a type icon.
+const rowPart = client.split('function evRow(e)')[1].split('function EvList')[0];
+assert(rowPart.includes("'/thumb.jpg'") && rowPart.includes("'/snapshot.jpg'") && rowPart.includes("addEventListener('error'"));
+assert(rowPart.includes('kindIcon('));
+for (const k of ['person','car','dog','cat','other']) assert(new RegExp('\\n    '+k+': \\[').test(client), k);
 const sw = fs.readFileSync(path.join(__dirname, 'static', 'sw.js'), 'utf8');
 assert(sw.includes("addEventListener('push'") && sw.includes("addEventListener('notificationclick'"));
 assert(sw.includes("clients.openWindow") || sw.includes('openWindow'));

@@ -234,6 +234,29 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !lb.hidden) lbClose(); });
 
   // ---------- detections list (shared by the tab and the camera page) ----------
+  // Detection type icon (24x24 line art in the accent colour); anything else gets a target.
+  const KIND = {
+    person: [['circle', { cx: 12, cy: 7, r: 3.2 }], ['path', { d: 'M5.5 20.5v-1.5a6.5 6.5 0 0 1 13 0v1.5' }]],
+    car: [['path', { d: 'M3 16.5v-4l2-5.5h14l2 5.5v4z' }], ['path', { d: 'M3 12.5h18' }],
+      ['circle', { cx: 7.5, cy: 17.5, r: 1.8 }], ['circle', { cx: 16.5, cy: 17.5, r: 1.8 }]],
+    dog: [['path', { d: 'M8 8.5a4 4 0 0 1 8 0v5.5a4 4 0 0 1-8 0z' }],
+      ['path', { d: 'M8.2 7.2C5.6 5.9 3.2 7 3.4 10.6c.1 2.3 1.2 4 2.6 3.7 1-.2 1.6-1.2 2-2.4' }],
+      ['path', { d: 'M15.8 7.2c2.6-1.3 5-.2 4.8 3.4-.1 2.3-1.2 4-2.6 3.7-1-.2-1.6-1.2-2-2.4' }],
+      ['circle', { cx: 10.4, cy: 10.6, r: 0.7, fill: 'currentColor' }], ['circle', { cx: 13.6, cy: 10.6, r: 0.7, fill: 'currentColor' }],
+      ['path', { d: 'M10.8 13.6h2.4L12 15z', fill: 'currentColor' }]],
+    cat: [['path', { d: 'M5 4.5l3.5 3.5h7L19 4.5v9a7 7 0 0 1-14 0z' }],
+      ['circle', { cx: 9.5, cy: 12.5, r: 0.75, fill: 'currentColor' }], ['circle', { cx: 14.5, cy: 12.5, r: 0.75, fill: 'currentColor' }],
+      ['path', { d: 'M11 15.3h2l-1 1.2z', fill: 'currentColor' }], ['path', { d: 'M2.5 14.3l4 .7M2.5 17.5l4-.7M21.5 14.3l-4 .7M21.5 17.5l-4-.7' }]],
+    other: [['circle', { cx: 12, cy: 12, r: 8 }], ['circle', { cx: 12, cy: 12, r: 2, fill: 'currentColor' }]],
+  };
+  function kindIcon(label) {
+    const NS = 'http://www.w3.org/2000/svg', key = KIND[label] ? label : 'other', wrap = document.createElement('span');
+    wrap.className = 'cd-kind cd-kind-' + key; wrap.title = cap(label || 'detection'); wrap.setAttribute('aria-hidden', 'true');
+    const svg = document.createElementNS(NS, 'svg');
+    [['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '1.7'], ['stroke-linecap', 'round'], ['stroke-linejoin', 'round']].forEach(([k, v]) => svg.setAttribute(k, v));
+    KIND[key].forEach(([tag, attrs]) => { const n = document.createElementNS(NS, tag); Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v)); svg.appendChild(n); });
+    wrap.appendChild(svg); return wrap;
+  }
   function evRow(e) {
     const it = document.createElement('div'); it.className = 'cd-row';
     const name = e.camera_name || detName[e.camera] || e.camera, label = cap(e.label);
@@ -242,7 +265,10 @@
     if (e.has_snapshot) {
       const b = document.createElement('div'); b.className = 'cd-row-thumb';
       const im = document.createElement('img'); im.loading = 'lazy'; im.alt = label + ' at ' + name;
-      im.src = CD + '/api/events/' + encodeURIComponent(e.id) + '/snapshot.jpg';
+      // Zoomed in on what was detected; the full snapshot if cams-detect has no thumbnail route yet.
+      const evBase = CD + '/api/events/' + encodeURIComponent(e.id);
+      im.addEventListener('error', () => { if (!im.dataset.full) { im.dataset.full = '1'; im.src = evBase + '/snapshot.jpg'; } });
+      im.src = evBase + '/thumb.jpg';
       const pl = document.createElement('span'); pl.className = 'cd-play'; pl.textContent = '\u25b6';
       b.append(im, pl); it.appendChild(b);
     } else { const ph = document.createElement('div'); ph.className = 'cd-row-thumb cd-row-none'; ph.textContent = 'No snapshot'; it.appendChild(ph); }
@@ -251,7 +277,7 @@
     const c = document.createElement('span'); c.textContent = name;
     const z = document.createElement('span'); z.className = 'muted sm'; z.textContent = (e.zones && e.zones.length) ? 'Zones: ' + e.zones.join(', ') : 'No zone';
     const t = document.createElement('span'); t.className = 'muted sm'; t.textContent = fmt(e.start_ts);
-    m.append(l, c, z, t); it.appendChild(m); return it;
+    m.append(l, c, z, t); it.appendChild(m); it.appendChild(kindIcon(String(e.label || '').toLowerCase())); return it;
   }
   // A list bound to a container: newest page is polled; "Load more" pages back with ?before=.
   function EvList(box, more, getQuery) {
