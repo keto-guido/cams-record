@@ -21,8 +21,6 @@ log = logging.getLogger(__name__)
 ADMIN_ROLE = "admin"
 ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 SNAP_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
-# HD companion go2rtc name for cameras.yaml `main_stream: <id>-main`. Not an arbitrary suffix.
-MAIN_COMPANION_SUFFIX = "-main"
 
 
 @dataclass(frozen=True)
@@ -91,42 +89,40 @@ def can_access(camera: Camera | None, user: str, roles) -> bool:
     return not camera.restricted or user in camera.users or bool(camera.roles.intersection(roles))
 
 
-def main_companion_parent(name: str) -> str | None:
-    """Parent camera id for an HD ``<id>-main`` companion stream name, else None.
+def is_configured_stream_helper(camera_id: str, sources: dict[str, tuple[str, ...]]) -> bool:
+    """True when ``camera_id`` is only a go2rtc source name for a logical camera.
 
-    Scoped to the exact ``-main`` suffix used by cameras.yaml ``main_stream`` companions.
-    Arbitrary suffixes (``-hd``, ``-hires``, …) do not inherit. The parent must itself be a
-    valid registry camera id shape; this helper does not invent registry rows.
+    Parent relation comes from cameras.yaml ``main_stream`` / ``sub_stream`` tuples, not from
+    stripping a ``-main`` suffix. A logical camera whose own id ends in ``-main`` has
+    ``camera_id in sources`` and is never treated as a helper.
     """
-    if not isinstance(name, str) or not name.endswith(MAIN_COMPANION_SUFFIX):
-        return None
-    parent = name[: -len(MAIN_COMPANION_SUFFIX)]
-    if not parent or not ID_RE.fullmatch(parent):
-        return None
-    return parent
+    if camera_id in sources:
+        return False
+    return any(camera_id in srcs for srcs in sources.values())
 
 
-def is_main_companion_id(camera_id: str) -> bool:
-    """True for internal HD helper ids that must not appear in App Hub list/publication."""
-    return main_companion_parent(camera_id) is not None
-
-
-def publishable_cameras(cameras: dict[str, Camera]) -> list[Camera]:
+def publishable_cameras(cameras: dict[str, Camera],
+                        sources: dict[str, tuple[str, ...]] | None = None) -> list[Camera]:
     """Registry cameras that belong in the shared App Hub list/publication.
 
-    Live grid and ``/cams/api/list`` must expose only parent low-res cameras. Internal
-    ``*-main`` HD companions used as go2rtc ``main_stream`` names stay out of the UX even
-    if a stale helper row remains in ``cams.json`` during migration.
+    Live grid and ``/cams/api/list`` must expose logical cameras only. When ``sources`` (the
+    cameras.yaml id → stream tuple map) is provided, registry rows that exist solely as another
+    camera's ``main_stream`` / ``sub_stream`` name are omitted — including mismatched helpers
+    such as ``main-st-south`` / ``main-st-south-main``. Logical ids that happen to end in
+    ``-main`` are kept. Without ``sources``, every registry row is returned; App Hub must keep
+    helpers out of ``cams.json`` rather than inventing a suffix filter.
     """
-    return [c for c in cameras.values() if not is_main_companion_id(c.id)]
+    if sources is None:
+        return list(cameras.values())
+    return [c for c in cameras.values() if not is_configured_stream_helper(c.id, sources)]
 
 
 def can_stream(cameras: dict[str, Camera], name: str, user: str, roles) -> bool:
     """A go2rtc stream is the same footage as every camera using it as id or snap: all must allow it.
 
-    Exact id/snap ownership only. Recorder HD ``main_stream`` companions inherit via
-    ``CameraAccess`` (configured parent mapping), not through this shared stream helper, so
-    App Hub live ``canStream`` stays exact until its twin is refreshed separately.
+    Exact id/snap ownership only. Recorder configured-stream inheritance lives in
+    ``CameraAccess`` (cameras.yaml ``main_stream`` / ``sub_stream``), not here, so App Hub live
+    ``canStream`` stays exact until its twin is refreshed separately.
     """
     owners = [c for c in cameras.values() if name in (c.id, c.snap)]
     return bool(owners) and all(can_access(c, user, roles) for c in owners)
@@ -160,6 +156,7 @@ class CameraRegistry:
 class CameraAccess:
     def __init__(self, cfg: dict, cameras=None):
         # Copy configured raw sources once; registry ACLs remain live on every request.
+        # Each logical camera id maps to its (main_stream, sub_stream) tuple from cameras.yaml.
         self.sources = {cid: tuple(src for src in (cam.main_stream, cam.sub_stream) if src)
                         for cid, cam in (cameras or {}).items()}
         self.source_owners = {}
@@ -170,33 +167,39 @@ class CameraAccess:
         self.registry = CameraRegistry(cfg["registry_file"])
 
     def _stream_owners(self, cameras: dict[str, Camera], name: str) -> list[Camera]:
-        """Registry owners of a stream name, plus a configured ``<parent>-main`` companion parent.
+        """Registry owners of a stream name via id/snap or cameras.yaml source mapping.
 
-        A ``*-main`` name inherits the parent camera's ACL only when that parent is a real
-        registry camera and cameras.yaml maps the companion as one of the parent's sources.
-        No parent mapping and no id/snap hit means unknown/denied — including for admins.
-        Direct registry ``*-main`` rows still count as owners when present (migration).
+        Any go2rtc name listed as a logical camera's ``main_stream`` or ``sub_stream`` inherits
+        that camera's registry ACL. Stream names need not equal ``<id>-main`` or the camera id
+        (e.g. logical ``main-street`` with ``sub_stream: main-st-south``). No configured owner
+        and no id/snap hit means unknown/denied — including for admins. Stale helper registry
+        rows still count as owners when present (migration).
         """
         owners = [c for c in cameras.values() if name in (c.id, c.snap)]
-        parent_id = main_companion_parent(name)
-        if parent_id is not None and parent_id in self.source_owners.get(name, ()):
-            parent = cameras.get(parent_id)
-            if parent is not None and all(o.id != parent.id for o in owners):
+        seen = {o.id for o in owners}
+        for cid in self.source_owners.get(name, ()):
+            parent = cameras.get(cid)
+            if parent is not None and parent.id not in seen:
                 owners.append(parent)
+                seen.add(parent.id)
         return owners
 
     def _can_source(self, cameras: dict[str, Camera], name: str, who: Viewer) -> bool:
         owners = self._stream_owners(cameras, name)
         return bool(owners) and all(can_access(c, who.user, who.roles) for c in owners)
 
+    def publishable(self) -> list[Camera]:
+        """App Hub list/publication view using this recorder's cameras.yaml source map."""
+        return publishable_cameras(self.registry.current(), self.sources)
+
     def allowed(self, camera: str, who: Viewer) -> bool:
         if who.claimed_user is not None and who.claimed_user != who.user:
             return False
         cameras = self.registry.current()
         sources = self.sources.get(camera)
-        # Camera id itself must be a real registry entry. Companion stream names used only as
-        # main_stream sources inherit below; requesting cam=<id>-main without a registry row
-        # does not gain the parent's capabilities.
+        # Camera id itself must be a real registry entry. Configured stream names inherit via
+        # _stream_owners; requesting cam=<stream-helper> without a registry row does not gain
+        # the parent's capabilities.
         return (camera in cameras and bool(sources)
                 and self._can_source(cameras, camera, who)
                 and all(self._can_source(cameras, src, who)

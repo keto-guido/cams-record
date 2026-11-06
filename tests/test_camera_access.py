@@ -16,8 +16,7 @@ from cams_record.camera_access import (
     Viewer,
     can_access,
     can_stream,
-    is_main_companion_id,
-    main_companion_parent,
+    is_configured_stream_helper,
     parse_registry,
     publishable_cameras,
 )
@@ -280,9 +279,13 @@ def test_invalid_boolean_env_fails(name, value):
 
 
 @pytest.mark.parametrize("quality", ["main_stream", "sub_stream"])
-@pytest.mark.parametrize("source,user,allowed", [("private", "bob", False), ("private", "ann", True),
-                                               ("unknown", "root", False), ("shared-raw", "bob", False),
-                                               ("shared-raw", "ann", True)])
+@pytest.mark.parametrize("source,user,allowed", [
+    # Other registry cameras / shared snaps that also own the source still constrain access.
+    ("private", "bob", False), ("private", "ann", True),
+    ("shared-raw", "bob", False), ("shared-raw", "ann", True),
+    # A go2rtc name that is only open's configured stream inherits open (no fake registry row).
+    ("open-main", "bob", True), ("open-main", "root", True),
+])
 def test_configured_sources_are_checked_before_database(tmp_path, quality, source, user, allowed):
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY + [
@@ -318,31 +321,43 @@ def test_configured_shared_source_requires_all_camera_owners(tmp_path, user, all
     assert access.allowed("open", Viewer(user, ("cams",))) is allowed
 
 
-@pytest.mark.parametrize("name,parent", [
-    ("front-door-main", "front-door"),
-    ("private-main", "private"),
-    ("a-main", "a"),
-    ("front-door", None),
-    ("front-door-hd", None),
-    ("front-door-main-stream", None),
-    ("-main", None),
-    ("Bad_ID-main", None),
-])
-def test_main_companion_parent_is_exact_suffix_only(name, parent):
-    assert main_companion_parent(name) == parent
-    assert is_main_companion_id(name) is (parent is not None)
-
-
-def test_publishable_cameras_omit_main_companions(tmp_path):
-    """App Hub list/publication must not surface internal *-main helpers."""
-    registry = tmp_path / "cams.json"
-    registry.write_text(json.dumps(REGISTRY + [
-        {"id": "private-main", "name": "HD helper (stale)", "users": ["ann"]},
-        {"id": "open-main", "name": "Open HD helper"},
+def test_publishable_cameras_omit_configured_stream_helpers_not_by_suffix():
+    """Helpers are cameras.yaml stream names; logical ids ending in -main stay publishable."""
+    sources = {
+        "front-door": ("front-door-main", "front-door"),
+        "front-yard": ("front-yard-main", "front-yard"),
+        "back-door": ("back-door-main", "back-door"),
+        "back-yard": ("back-yard-main", "back-yard"),
+        # Exceptional: stream names do not equal the logical id / <id>-main pattern.
+        "main-street": ("main-st-south-main", "main-st-south"),
+        # Independent low-res logical camera whose id itself ends in -main.
+        "dock-main": ("dock-main-hires", "dock-main"),
+    }
+    cams = parse_registry(json.dumps([
+        {"id": "front-door", "name": "Front Door"},
+        {"id": "front-yard", "name": "Front Yard"},
+        {"id": "back-door", "name": "Back Door"},
+        {"id": "back-yard", "name": "Back Yard"},
+        {"id": "main-street", "name": "Main Street"},
+        {"id": "dock-main", "name": "Dock low-res"},
+        # Stale ACL-proof helpers that grew live registry 5→11:
+        {"id": "front-door-main", "name": "helper"},
+        {"id": "front-yard-main", "name": "helper"},
+        {"id": "back-door-main", "name": "helper"},
+        {"id": "back-yard-main", "name": "helper"},
+        {"id": "main-st-south", "name": "helper"},
+        {"id": "main-st-south-main", "name": "helper"},
+        {"id": "dock-main-hires", "name": "helper"},
     ]))
-    cameras = CameraRegistry(str(registry)).current()
-    assert set(cameras) == {"open", "family", "private", "private-main", "open-main"}
-    assert [c.id for c in publishable_cameras(cameras)] == ["open", "family", "private"]
+    assert is_configured_stream_helper("front-door-main", sources)
+    assert is_configured_stream_helper("main-st-south", sources)
+    assert is_configured_stream_helper("main-st-south-main", sources)
+    assert not is_configured_stream_helper("dock-main", sources)
+    assert not is_configured_stream_helper("main-street", sources)
+    assert [c.id for c in publishable_cameras(cams, sources)] == [
+        "front-door", "front-yard", "back-door", "back-yard", "main-street", "dock-main"]
+    # Without sources, no suffix guessing — every registry row remains.
+    assert len(publishable_cameras(cams)) == len(cams)
 
 
 @pytest.mark.parametrize("user,roles,allowed", [
@@ -351,33 +366,59 @@ def test_publishable_cameras_omit_main_companions(tmp_path):
     ("root", ("admin",), True),
     ("", ("admin",), False),
 ])
-def test_configured_main_companion_inherits_parent_acl(tmp_path, user, roles, allowed):
-    """HD main_stream <id>-main needs no fake registry row when the parent is registered."""
+def test_configured_stream_sources_inherit_parent_acl(tmp_path, user, roles, allowed):
+    """Configured main/sub streams need no fake registry rows when the logical camera is registered."""
     registry = tmp_path / "cams.json"
-    registry.write_text(json.dumps(REGISTRY))  # no *-main entries
+    registry.write_text(json.dumps(REGISTRY))  # logical cameras only
     cameras = {
         "private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"}),
-        "open": resolve_camera("open", {"main_stream": "open-main", "sub_stream": "open"}),
+        "open": resolve_camera("open", {"main_stream": "open-hires", "sub_stream": "open"}),
     }
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
     assert access.allowed("private", Viewer(user, roles)) is allowed
     # Open parent: anyone with a user identity may access; empty user still denied.
+    # open-hires is not a *-main name; inheritance is from the structured mapping.
     assert access.allowed("open", Viewer(user, roles)) is bool(user)
 
 
-def test_main_companion_without_parent_mapping_denies_even_admin(tmp_path):
-    """No cameras.yaml parent source and no registry id/snap → unknown, including admin."""
+def test_mismatched_stream_names_inherit_without_helpers(tmp_path):
+    """Live-shaped exception: sub/main stream ids differ from the logical camera id."""
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps([
+        {"id": "main-street", "name": "Main Street", "users": ["ann"]},
+        {"id": "front-door", "name": "Front Door"},
+    ]))
+    cameras = {
+        "main-street": resolve_camera("main-street", {
+            "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        }),
+        "front-door": resolve_camera("front-door", {
+            "main_stream": "front-door-main", "sub_stream": "front-door",
+        }),
+    }
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert access.allowed("main-street", Viewer("ann", ("cams",)))
+    assert not access.allowed("main-street", Viewer("bob", ("cams",)))
+    assert access.allowed("front-door", Viewer("bob", ("cams",)))
+    # Helper stream names are not camera ids — no capability boost.
+    for helper in ("main-st-south", "main-st-south-main", "front-door-main"):
+        assert not access.allowed(helper, Viewer("ann", ("cams",)))
+        assert not access.allowed(helper, Viewer("root", ("admin",)))
+    assert [c.id for c in access.publishable()] == ["main-street", "front-door"]
+
+
+def test_unmapped_stream_name_denies_even_admin(tmp_path):
+    """No cameras.yaml owner and no registry id/snap → unknown, including admin."""
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY))
-    # open's sources are unrelated names; private-main is not configured as anyone's source.
     cameras = {"open": resolve_camera("open", {"main_stream": "open", "sub_stream": "open"})}
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
     assert access._can_source(access.registry.current(), "private-main", Viewer("root", ("admin",))) is False
-    assert not access.allowed("private-main", Viewer("root", ("admin",)))  # not a registry camera
+    assert not access.allowed("private-main", Viewer("root", ("admin",)))
 
 
-def test_direct_main_camera_id_does_not_inherit_parent(tmp_path):
-    """cam=<id>-main without a registry row is denied; no parent capability boost."""
+def test_direct_helper_camera_id_does_not_inherit_parent(tmp_path):
+    """cam=<helper> without a registry row is denied even when cameras.yaml records that stream."""
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY))
     cameras = {
@@ -390,16 +431,28 @@ def test_direct_main_camera_id_does_not_inherit_parent(tmp_path):
     assert not access.allowed("private-main", Viewer("root", ("admin",)))
 
 
-def test_arbitrary_suffix_does_not_inherit(tmp_path):
+def test_logical_camera_id_ending_in_main_is_not_bypassed_or_dropped(tmp_path):
+    """An independent low-res camera whose id ends in -main keeps ACL + publication."""
     registry = tmp_path / "cams.json"
-    registry.write_text(json.dumps(REGISTRY))
-    cameras = {"private": resolve_camera("private", {"main_stream": "private-hd", "sub_stream": "private"})}
+    registry.write_text(json.dumps([
+        {"id": "dock-main", "name": "Dock", "users": ["ann"]},
+        {"id": "dock-main-hires", "name": "Stale HD helper"},
+    ]))
+    cameras = {
+        "dock-main": resolve_camera("dock-main", {
+            "main_stream": "dock-main-hires", "sub_stream": "dock-main",
+        }),
+    }
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
-    assert not access.allowed("private", Viewer("ann", ("cams",)))
-    assert not access.allowed("private", Viewer("root", ("admin",)))
+    assert access.allowed("dock-main", Viewer("ann", ("cams",)))
+    assert not access.allowed("dock-main", Viewer("bob", ("cams",)))
+    assert access.allowed("dock-main", Viewer("root", ("admin",)))
+    assert not access.allowed("dock-main-hires", Viewer("ann", ("cams",)))
+    assert [c.id for c in access.publishable()] == ["dock-main"]
+    assert not is_configured_stream_helper("dock-main", access.sources)
 
 
-def test_restricted_parent_denies_companion_source_for_others(tmp_path):
+def test_restricted_parent_denies_configured_streams_for_others(tmp_path):
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY))
     cameras = {"private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"})}
@@ -407,32 +460,35 @@ def test_restricted_parent_denies_companion_source_for_others(tmp_path):
     cams = access.registry.current()
     assert access._can_source(cams, "private-main", Viewer("ann", ("cams",)))
     assert not access._can_source(cams, "private-main", Viewer("bob", ("cams",)))
-    # Admin still follows parent grant (registered parent), matching prior admin policy.
     assert access._can_source(cams, "private-main", Viewer("root", ("admin",)))
 
 
-def test_stale_companion_registry_row_still_must_allow_all_owners(tmp_path):
-    """If a leftover *-main registry row exists, its ACL and the parent's must both allow."""
+def test_stale_helper_registry_row_still_must_allow_all_owners(tmp_path):
+    """If a leftover helper registry row exists, its ACL and the logical parent's must both allow."""
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY + [
         {"id": "private-main", "name": "Stale helper", "users": ["zed"]}]))
     cameras = {"private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"})}
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
-    assert not access.allowed("private", Viewer("ann", ("cams",)))  # companion users=["zed"] blocks
+    assert not access.allowed("private", Viewer("ann", ("cams",)))  # helper users=["zed"] blocks
     assert not access.allowed("private", Viewer("zed", ("cams",)))  # parent users=["ann"] blocks
     assert access.allowed("private", Viewer("root", ("admin",)))
-    # Publication still hides the helper even while it remains in cams.json.
-    assert "private-main" not in {c.id for c in publishable_cameras(access.registry.current())}
+    assert "private-main" not in {c.id for c in access.publishable()}
 
 
-def test_hd_export_and_sub_routes_without_main_registry_entries(tmp_path, monkeypatch):
-    """Record serves parent HD export/clip and low-res routes with only parent registry rows."""
+def test_hd_export_and_sub_routes_without_helper_registry_entries(tmp_path, monkeypatch):
+    """Record serves logical-camera HD export/clip and low-res routes without helper cams.json rows."""
     from cams_record.media import Media
 
     secret = tmp_path / "secret"
     secret.write_text(SECRET)
     registry = tmp_path / "cams.json"
-    registry.write_text(json.dumps(REGISTRY))  # 3 parents only; no *-main hacks
+    registry.write_text(json.dumps([
+        {"id": "private", "name": "Private", "users": ["ann"]},
+        {"id": "open", "name": "Open"},
+        {"id": "main-street", "name": "Main Street", "users": ["ann"]},
+        {"id": "dock-main", "name": "Dock", "users": ["ann"]},
+    ]))
     root = tmp_path / "nvr"
     root.mkdir()
     (root / "a.mp4").write_bytes(b"segment")
@@ -441,7 +497,12 @@ def test_hd_export_and_sub_routes_without_main_registry_entries(tmp_path, monkey
     cameras = {
         "private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"}),
         "open": resolve_camera("open", {"main_stream": "open-main", "sub_stream": "open"}),
-        "family": resolve_camera("family", {"main_stream": "family-main", "sub_stream": "family"}),
+        "main-street": resolve_camera("main-street", {
+            "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        }),
+        "dock-main": resolve_camera("dock-main", {
+            "main_stream": "dock-main-hires", "sub_stream": "dock-main",
+        }),
     }
     db = Mock()
     db.segment_rows.return_value = [seg() | {"id": 1, "camera_id": "private", "quality": "sub"}]
@@ -460,21 +521,25 @@ def test_hd_export_and_sub_routes_without_main_registry_entries(tmp_path, monkey
     monkeypatch.setattr("cams_record.clips.subprocess.run", clip_run)
     monkeypatch.setattr(Media, "run", media_run)
 
-    # Authorized: low-res timeline + HD export/clip on the parent id.
     assert client.get("/api/timeline?cam=private&start=0&end=60", headers=headers("ann")).status_code == 200
+    assert client.get("/api/timeline?cam=main-street&start=0&end=60", headers=headers("ann")).status_code == 200
+    assert client.get("/api/timeline?cam=dock-main&start=0&end=60", headers=headers("ann")).status_code == 200
     export = client.get("/api/export?cam=private&start=10&end=40&quality=main", headers=headers("ann"))
     assert export.status_code == 200
     assert export.headers.get("x-export-quality") == "main"
-    clip = client.get("/api/clip?camera=private&start=10&end=40&quality=main", headers=headers("ann"))
-    assert clip.status_code == 200
+    assert client.get("/api/clip?camera=private&start=10&end=40&quality=main",
+                      headers=headers("ann")).status_code == 200
+    # Mismatched HD pair also authorizes export on the logical id.
+    db.clip_segments.return_value = ([seg() | {"camera_id": "main-street", "quality": "main"}], 60)
+    assert client.get("/api/export?cam=main-street&start=10&end=40&quality=main",
+                      headers=headers("ann")).status_code == 200
 
-    # Denied users cannot use the parent or invent a companion camera id.
     assert client.get("/api/export?cam=private&start=10&end=40&quality=main", headers=headers("bob")).status_code == 404
-    assert client.get("/api/export?cam=private-main&start=10&end=40&quality=main",
-                      headers=headers("ann")).status_code == 404
-    assert client.get("/api/export?cam=private-main&start=10&end=40&quality=main",
-                      headers=headers("root", ["admin"])).status_code == 404
+    for helper in ("private-main", "main-st-south", "main-st-south-main", "dock-main-hires"):
+        assert client.get(f"/api/export?cam={helper}&start=10&end=40&quality=main",
+                          headers=headers("ann")).status_code == 404
+        assert client.get(f"/api/export?cam={helper}&start=10&end=40&quality=main",
+                          headers=headers("root", ["admin"])).status_code == 404
 
-    # Publication contract: only the three parents (App Hub must not list helpers).
-    assert [c.id for c in publishable_cameras(CameraRegistry(str(registry)).current())] == [
-        "open", "family", "private"]
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert [c.id for c in access.publishable()] == ["private", "open", "main-street", "dock-main"]

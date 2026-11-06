@@ -37,33 +37,34 @@ Matching is exact and case-sensitive.
 access to every camera whose `id` or `snap` equals it. A name matching no camera is denied. Every
 route that reaches go2rtc or recordings applies this rule, so a client-supplied name is never trusted.
 
-**HD main companions (recorder).** cams-record `cameras.yaml` names the HD go2rtc stream
-`<id>-main` (`main_stream`) and the low-res stream `<id>` (`sub_stream`). The recorder authorizes
-recorded footage for the **parent** camera id. When checking configured sources, a stream named
-exactly `<parent>-main` inherits that parent's registry ACL **if and only if**:
+**Configured stream sources (recorder).** cams-record authorizes recorded footage for the
+**logical** camera id (the cameras.yaml key / registry id). Each camera's structured
+`main_stream` and `sub_stream` names are checked against registry owners. A go2rtc stream name
+inherits a logical camera's registry ACL when that camera lists the name as `main_stream` or
+`sub_stream` — the names need not equal the camera id or follow `<id>-main` (live example:
+mismatched low-res / HD pair `main-st-south` / `main-st-south-main` under a different logical
+id). Parent relation always comes from that mapping, never from stripping a `-main` suffix.
 
-1. `<parent>` is a real registry camera, and
-2. that parent (or another configured camera) lists `<parent>-main` as a `main_stream` /
-   `sub_stream` source in cameras.yaml.
+No cameras.yaml owner and no registry id/snap hit → the stream is unknown and denied, including
+for admins. Requesting `cam=<stream-helper>` without a registry row does **not** inherit parent
+capability. Restricted parent denied ⇒ its configured streams denied, with the same admin
+exception as the parent (`admin` may access registered parents).
 
-This is not an arbitrary suffix bypass: only the `-main` companion used by real low-res camera
-definitions inherits. No matching parent mapping → the companion is unknown and denied, including
-for admins. Requesting `cam=<id>-main` as the camera id does **not** inherit parent capability;
-only a real registry row for that id would. Restricted parent denied ⇒ companion denied, with the
-same admin exception as the parent (`admin` may access registered parents).
-
-Live view must keep using the parent id (low-res). HD is for export/clip `quality=main` on the
-parent id, not a separate live tile.
+Live view must keep using the logical camera id (low-res path). HD is for export/clip
+`quality=main` on that id, not a separate live tile.
 
 **Publication / App Hub list.** Shared registry publication consumed by App Hub (`C.cameras.list`,
-`fileAccess().list`, `/cams/`, `/cams/api/list`) must include **only** parent low-res cameras.
-Internal `*-main` HD helpers must not appear in that list — they are go2rtc / cameras.yaml source
-names, not UX cameras. Do not keep fake `*-main` registry rows merely to satisfy recorder source
-checks; the recorder parent-mapping above replaces that hack. cams-record exposes
-`publishable_cameras()` / `is_main_companion_id()` as the publication filter contract; App Hub's
-own `camera-access.js` / `C.cameras` (pinned consumer of cams-record's registry contract; App Hub
-revision historically tied to cams-record `@8e320496`, e.g. hub change `89277156`) must apply the
-same filter when refreshing the wrapper. This repository does not modify App Hub itself.
+`fileAccess().list`, `/cams/`, `/cams/api/list`) must include **only** logical cameras. Internal
+go2rtc helper names (`main_stream` / `sub_stream` values that are not themselves camera ids) must
+not appear — including both `*-main` HD helpers and mismatched low-res aliases. Do **not** filter
+by a bare `-main` suffix: a logical camera whose id ends in `-main` is a real UX camera and must
+remain listed. Do not keep fake helper registry rows merely to satisfy recorder source checks; the
+structured mapping above replaces that hack. cams-record exposes `publishable_cameras(cameras,
+sources)` / `is_configured_stream_helper()` / `CameraAccess.publishable()` as the publication
+contract; App Hub's own `camera-access.js` / `C.cameras` (pinned consumer of cams-record's
+registry contract; App Hub revision historically tied to cams-record `@8e320496`, e.g. hub change
+`89277156`) must follow the same rule when refreshing the wrapper. This repository does not
+modify App Hub itself.
 
 **Responses.** Unknown and forbidden cameras give the same 404. The API never returns `users` or
 `roles`; clients see only `{id, name}`.
@@ -94,9 +95,9 @@ Pinned publication interface for App Hub wrappers refreshing against this contra
 
 | Method | Required behavior |
 | --- | --- |
-| `list(user)` | Visible **parent** cameras only: `{id, name}` (optional `snap` internally). Never emit `*-main` companion/helper ids. |
-| `get(user, id)` / `can(user, id)` | Exact registry id. No parent boost for a missing `*-main` camera id. |
-| `canStream(user, name)` | Exact id/snap owners (shared vectors). Live grid streams the parent id (low-res). Recorder HD companion inheritance is cams-record-only via configured `main_stream`. |
+| `list(user)` | Visible **logical** cameras only: `{id, name}` (optional `snap` internally). Never emit go2rtc `main_stream`/`sub_stream` helper ids. Do not drop logical ids that end in `-main`. |
+| `get(user, id)` / `can(user, id)` | Exact registry id. No parent boost for a missing stream-helper camera id. |
+| `canStream(user, name)` | Exact id/snap owners (shared vectors). Live grid streams the logical camera id (low-res). Recorder stream inheritance is cams-record-only via cameras.yaml `main_stream`/`sub_stream`. |
 
 ## Routes
 
@@ -147,7 +148,8 @@ Configure App Hub to write its live registry there; never mount its general data
 Mount this dedicated directory read-only in cams-record so atomic replacements remain visible.
 
 Recorded footage also checks both configured `main_stream` and `sub_stream` against registry owners
-by id or snap before querying recordings. A configured `<parent>-main` HD companion additionally
-inherits the parent camera's ACL as described above, so HD export/download works without registering
-fake `*-main` companion cameras. Other missing mappings and unregistered sources still deny access,
-including for admins. Shared non-companion raw streams still need an owning camera id or snap.
+by id or snap, and against every logical camera that lists that name in cameras.yaml, before
+querying recordings. HD export/download and mismatched stream aliases therefore work without
+registering fake helper cameras. Unmapped / unregistered sources still deny access, including for
+admins. Shared raw streams still require every owning logical camera (and any id/snap registry
+hit) to allow the viewer.
