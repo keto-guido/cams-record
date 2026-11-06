@@ -601,15 +601,16 @@
   refreshPushUi();
 
   // ---------- deep-link: #event=<id> opens the authorized detection lightbox ----------
+  // Production event ids are strings (e.g. "1793897909-7de0b7"), not integers.
   let openingEvent = null;
   async function openEventId(id) {
-    const n = Number(id);
-    if (!Number.isFinite(n) || n < 1 || openingEvent === n) return;
-    openingEvent = n;
+    const eid = decodeURIComponent(String(id || '')).trim();
+    if (!eid || openingEvent === eid) return;
+    openingEvent = eid;
     try {
       let ev = null;
       try {
-        const ctx = await pushJson(CR_PUSH + '/event-context/' + n);
+        const ctx = await pushJson(CR_PUSH + '/event-context/' + encodeURIComponent(eid));
         ev = {
           id: ctx.id,
           camera: ctx.camera_id || ctx.camera,
@@ -623,7 +624,7 @@
         };
       } catch (e) {
         const list = await fetch(CD + '/api/events?limit=50', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []);
-        ev = (list || []).find(x => String(x.id) === String(n)) || null;
+        ev = (list || []).find(x => String(x.id) === eid) || null;
       }
       if (!ev) { if (pushStatus) pushStatus.textContent = 'That detection is no longer available.'; return; }
       await cdReady;
@@ -636,7 +637,7 @@
   // ---------- routing ----------
   function parse() {
     const h = location.hash.replace(/^#/, '');
-    const ev = h.match(/^event=(\d+)$/);
+    const ev = h.match(/^event=([^&]+)$/);
     if (ev) return { view: 'event', eventId: ev[1] };
     if (h === 'detections') return { view: 'det' };
     const m = h.match(/^cam=([a-z0-9][a-z0-9-]{0,31})$/);

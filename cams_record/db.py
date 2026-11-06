@@ -97,6 +97,12 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             KEY idx_push_sent_at (sent_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     ]),
+    # v5 created event_id as BIGINT; production cams_detect.events.id values are strings
+    # (e.g. "1793897909-7de0b7"). Tables may already exist empty on rolled-back installs.
+    (6, [
+        """ALTER TABLE push_sent_events
+            MODIFY COLUMN event_id VARCHAR(64) NOT NULL""",
+    ]),
 ]
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions",
@@ -320,28 +326,33 @@ class Database:
         return self.run(q)
 
     def detection_events_for_push(self, since: float, limit: int = 200) -> list[dict]:
-        """Recent cams_detect events that have not yet been claimed for Web Push."""
+        """Recent cams_detect events that have not yet been claimed for Web Push.
+
+        Production ``cams_detect.events`` uses string ``id`` values and ``max_score``
+        (not ``score``).
+        """
         def q(cur):
-            cur.execute("""SELECT e.id, e.camera_id, e.label, e.score, e.start_ts, e.end_ts
+            cur.execute("""SELECT e.id, e.camera_id, e.label, e.max_score, e.start_ts, e.end_ts
                            FROM cams_detect.events e
                            LEFT JOIN push_sent_events s ON s.event_id = e.id
                            WHERE s.event_id IS NULL AND e.start_ts >= %s
-                           ORDER BY e.id ASC LIMIT %s""", (to_dt(since), int(limit)))
-            return [{"id": int(r[0]), "camera_id": r[1], "label": r[2],
+                           ORDER BY e.start_ts ASC, e.id ASC LIMIT %s""",
+                        (to_dt(since), int(limit)))
+            return [{"id": str(r[0]), "camera_id": r[1], "label": r[2],
                      "score": float(r[3]) if r[3] is not None else None,
                      "start_ts": from_dt(r[4]),
                      "end_ts": from_dt(r[5]) if r[5] is not None else None}
                     for r in cur.fetchall()]
         return self.run(q)
 
-    def detection_event_by_id(self, event_id: int) -> dict | None:
+    def detection_event_by_id(self, event_id: str) -> dict | None:
         def q(cur):
-            cur.execute("""SELECT id, camera_id, label, score, start_ts, end_ts
-                           FROM cams_detect.events WHERE id=%s""", (int(event_id),))
+            cur.execute("""SELECT id, camera_id, label, max_score, start_ts, end_ts
+                           FROM cams_detect.events WHERE id=%s""", (str(event_id),))
             r = cur.fetchone()
             if not r:
                 return None
-            return {"id": int(r[0]), "camera_id": r[1], "label": r[2],
+            return {"id": str(r[0]), "camera_id": r[1], "label": r[2],
                     "score": float(r[3]) if r[3] is not None else None,
                     "start_ts": from_dt(r[4]),
                     "end_ts": from_dt(r[5]) if r[5] is not None else None}
@@ -388,12 +399,12 @@ class Database:
                              r, strict=True)) for r in cur.fetchall()]
         return self.run(q)
 
-    def claim_push_event(self, event_id: int, camera_id: str) -> bool:
+    def claim_push_event(self, event_id: str, camera_id: str) -> bool:
         """Insert a send claim. Returns True when this caller won (should send)."""
         def q(cur):
             n = cur.execute(
                 "INSERT IGNORE INTO push_sent_events (event_id, camera_id) VALUES (%s, %s)",
-                (int(event_id), camera_id))
+                (str(event_id), camera_id))
             return n == 1
         return self.run(q)
 

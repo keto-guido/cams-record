@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 ENDPOINT_MAX = 2048
 KEY_MAX = 255
 UA_MAX = 512
+# Production cams_detect.events.id values look like "1793897909-7de0b7".
+EVENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 # RFC 8030 push services we accept; reject arbitrary URLs to limit SSRF via stored endpoints.
 _ENDPOINT_HOST_OK = re.compile(
     r"^(?:([a-z0-9-]+\.)*web\.push\.apple\.com|"
@@ -44,13 +46,22 @@ class PushError(Exception):
 
 @dataclass(frozen=True)
 class DetectionEvent:
-    id: int
+    id: str
     camera_id: str
     label: str
     score: float | None
     start_ts: float
     end_ts: float | None
     camera_name: str | None = None
+
+
+def normalize_event_id(value) -> str:
+    if value is None:
+        raise PushError(400, "invalid event id")
+    eid = str(value).strip()
+    if not EVENT_ID_RE.fullmatch(eid):
+        raise PushError(400, "invalid event id")
+    return eid
 
 
 def endpoint_hash(endpoint: str) -> str:
@@ -95,17 +106,26 @@ def application_server_key(public_raw: bytes) -> str:
     return base64.urlsafe_b64encode(public_raw).decode("ascii").rstrip("=")
 
 
-def load_vapid_public_b64(private_pem: str) -> str:
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+def load_vapid_from_pem(private_pem: str | bytes):
+    """Load a VAPID key the way pywebpush expects (PEM → Vapid object, not DER-from-string)."""
     from py_vapid import Vapid
 
-    vapid = Vapid.from_pem(private_pem.encode("utf-8") if isinstance(private_pem, str) else private_pem)
+    raw = private_pem.encode("utf-8") if isinstance(private_pem, str) else private_pem
+    return Vapid.from_pem(raw)
+
+
+def load_vapid_public_b64(private_pem: str | bytes) -> str:
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    vapid = load_vapid_from_pem(private_pem)
     raw = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
     return application_server_key(raw)
 
 
 def deep_link_for(event: DetectionEvent) -> str:
-    return f"/cams/#event={int(event.id)}"
+    from urllib.parse import quote
+
+    return f"/cams/#event={quote(str(event.id), safe='')}"
 
 
 def notification_payload(event: DetectionEvent, *, test: bool = False) -> dict[str, Any]:
@@ -113,15 +133,14 @@ def notification_payload(event: DetectionEvent, *, test: bool = False) -> dict[s
     name = (event.camera_name or event.camera_id or "camera").strip() or "camera"
     title = "Test notification" if test else f"{label.capitalize()} · {name}"
     body = "Cameras push is working on this device." if test else f"Detection at {name}"
-    url = deep_link_for(event) if not test else "/cams/#detections"
-    if test and event.id <= 0:
-        url = "/cams/#detections"
+    has_event = bool(str(event.id or "").strip()) and not test
+    url = deep_link_for(event) if has_event else "/cams/#detections"
     return {
         "title": title,
         "body": body,
         "url": url,
-        "tag": f"cams-event-{event.id}" if event.id > 0 else "cams-push-test",
-        "event_id": int(event.id) if event.id > 0 else None,
+        "tag": f"cams-event-{event.id}" if has_event else "cams-push-test",
+        "event_id": str(event.id) if has_event else None,
         "camera_id": event.camera_id,
         "camera_name": event.camera_name or event.camera_id,
         "label": label,
@@ -136,7 +155,8 @@ class PushService:
     def __init__(self, db, cfg: dict):
         self.db = db
         self.cfg = cfg
-        self._private: str | None = None
+        self._private_pem: str | None = None
+        self._vapid = None
         self._public_b64: str | None = None
         self._private_read = 0.0
         self._webhook: str | None = None
@@ -145,28 +165,48 @@ class PushService:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.cfg.get("enabled", True)) and self.private_key() is not None
+        return bool(self.cfg.get("enabled", True)) and self.vapid() is not None
+
+    def private_key_path(self) -> str | None:
+        path = self.cfg.get("vapid_private_file")
+        return str(path) if path else None
 
     def private_key(self) -> str | None:
-        if self._private is None or time.monotonic() - self._private_read > 60:
-            raw = read_secret(self.cfg.get("vapid_private_file"))
-            self._private = raw or None
+        """PEM text from the secret file (for diagnostics / deriving the public key)."""
+        self.vapid()
+        return self._private_pem
+
+    def vapid(self):
+        """Return a py_vapid.Vapid instance loaded from the PEM secret file.
+
+        pywebpush treats a bare PEM string as ``Vapid.from_string`` (DER/base64) and
+        raises ``ValueError: Could not deserialize key data``. Pass a file path or a
+        ``Vapid`` instance instead — we use the instance loaded via ``from_pem``.
+        """
+        if self._vapid is None or time.monotonic() - self._private_read > 60:
+            self._private_pem = None
+            self._vapid = None
             self._public_b64 = None
             self._private_read = time.monotonic()
-            if self._private:
+            raw = read_secret(self.cfg.get("vapid_private_file"))
+            if raw:
                 try:
-                    self._public_b64 = load_vapid_public_b64(self._private)
+                    self._vapid = load_vapid_from_pem(raw)
+                    self._private_pem = raw
+                    self._public_b64 = load_vapid_public_b64(raw)
                 except Exception:  # noqa: BLE001
-                    log.exception("push: failed to derive VAPID public key")
-                    self._private = None
+                    log.exception("push: failed to load VAPID private key from %s",
+                                  self.cfg.get("vapid_private_file"))
+                    self._private_pem = None
+                    self._vapid = None
                     self._public_b64 = None
             configured = (self.cfg.get("vapid_public_key") or "").strip()
-            if configured and self._private:
+            if configured and self._vapid is not None:
                 self._public_b64 = configured
-        return self._private
+        return self._vapid
 
     def public_key(self) -> str | None:
-        if self.private_key() is None:
+        if self.vapid() is None:
             return None
         return self._public_b64
 
@@ -210,8 +250,8 @@ class PushService:
 
     def send_raw(self, subscription: dict, payload: dict) -> tuple[bool, int | None]:
         """Send one notification. Returns (ok, status_code). Prunes 404/410."""
-        private = self.private_key()
-        if not private:
+        vapid = self.vapid()
+        if vapid is None:
             return False, None
         try:
             from pywebpush import WebPushException, webpush
@@ -225,10 +265,11 @@ class PushService:
             "keys": {"p256dh": subscription["p256dh"], "auth": subscription["auth"]},
         }
         try:
+            # Pass a Vapid instance (from_pem). PEM text would be mis-parsed as DER.
             webpush(
                 subscription_info=info,
                 data=data,
-                vapid_private_key=private,
+                vapid_private_key=vapid,
                 vapid_claims=claims,
                 ttl=int(self.cfg.get("ttl_s", 86400)),
                 timeout=float(self.cfg.get("timeout_s", 10)),
@@ -306,21 +347,27 @@ class PushNotifier:
         label_set = {str(x).lower() for x in labels} if labels else None
         try:
             events = self.db.detection_events_for_push(self.watermark - float(self.cfg.get("lookback_s", 120)))
-        except Exception:
-            log.warning("push notifier: poll failed (check SELECT grant on cams_detect.events)",
-                        exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            # Schema mismatches (unknown column) and missing grants both surface here —
+            # log the actual error instead of always blaming SELECT grants.
+            log.warning("push notifier: poll failed: %s", exc, exc_info=True)
             return 0
         n = 0
         newest = self.watermark
         for raw in events:
             newest = max(newest, float(raw["start_ts"]))
             label = str(raw.get("label") or "detection")
+            try:
+                event_id = normalize_event_id(raw["id"])
+            except PushError:
+                log.warning("push notifier: skipping event with invalid id %r", raw.get("id"))
+                continue
             if label_set is not None and label.lower() not in label_set:
                 # Still claim so a later label-filter change does not flood old events.
-                self.db.claim_push_event(int(raw["id"]), raw["camera_id"])
+                self.db.claim_push_event(event_id, raw["camera_id"])
                 continue
             event = DetectionEvent(
-                id=int(raw["id"]),
+                id=event_id,
                 camera_id=str(raw["camera_id"]),
                 label=label,
                 score=float(raw["score"]) if raw.get("score") is not None else None,
