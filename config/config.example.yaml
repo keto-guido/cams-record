@@ -27,6 +27,11 @@ auth:
   mode: jwt              # jwt | none (none only for local testing)
   secret_file: /run/secrets/apphub_jwt
   app_id: cams-record    # required JWT audience
+  roles: [cams, admin]
+  admin_roles: [admin]
+access:
+  enforce: true          # per-camera ACL from App Hub's cams.json; see docs/camera-access.md
+  registry_file: /apphub-data/cams.json
 db:
   host: 127.0.0.1        # the NAS's MariaDB 10 (host networking)
   port: 3306

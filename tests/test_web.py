@@ -25,8 +25,8 @@ def client(tmp_path):
     return TestClient(create_app(svc, cfg))
 
 
-def tok(roles=("admin",), exp=60, secret=SECRET):
-    return jwt.encode({"aud": "cams-record", "sub": "eric", "roles": list(roles), "exp": int(time.time()) + exp},
+def tok(roles=("admin",), exp=60, secret=SECRET, sub="eric"):
+    return jwt.encode({"aud": "cams-record", "sub": sub, "roles": list(roles), "exp": int(time.time()) + exp},
                       secret, "HS256")
 
 

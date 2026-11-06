@@ -47,6 +47,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install Python deps
         run: pip install -r requirements-dev.txt
+      - name: Grant access to the isolated production-shaped detection test schema
+        run: |
+          python - <<'PY'
+          import pymysql
+          conn = pymysql.connect(host="127.0.0.1", user="root", password="rootpw", autocommit=True)
+          with conn.cursor() as cur:
+              cur.execute("GRANT ALL ON cams_detect.* TO 'cams_record'@'%'")
+          conn.close()
+          PY
       - name: Unit tests (MariaDB-backed)
         run: python -m pytest -q -rs -m "not integration" | tee /tmp/unit.txt
       - name: Fail if MariaDB tests were skipped

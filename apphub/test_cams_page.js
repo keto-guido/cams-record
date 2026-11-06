@@ -60,6 +60,6 @@ app.handle({method:'GET'}, {done:r=>{
       assert.equal(r3.headers['Cache-Control'],'private, max-age=86400');
       fs.rmSync(dir,{recursive:true});
       console.log('camera page tests passed');
-    }}, {}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));
-  }}, {}, '/cams/manifest.webmanifest', new URL('http://localhost/cams/manifest.webmanifest'));
-}}, {}, '/cams/sw.js', new URL('http://localhost/cams/sw.js'));
+    }}, {user:'test'}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));
+  }}, {user:'test'}, '/cams/manifest.webmanifest', new URL('http://localhost/cams/manifest.webmanifest'));
+}}, {user:'test'}, '/cams/sw.js', new URL('http://localhost/cams/sw.js'));

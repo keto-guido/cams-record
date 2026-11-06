@@ -1,6 +1,8 @@
 import calendar
 import os
+import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -88,10 +90,19 @@ def test_poll_segment_list_queues_only_closed_segments(tmp_path):
     assert r.bytes_total == 2000
 
 
+def exits_with_1(tmp_path):
+    """Windows has no ``false``; a missing binary would test "failed to start" instead of an exit."""
+    if shutil.which("false"):
+        return "false"
+    stub = tmp_path / "false.cmd"
+    stub.write_text("@exit /b 1\n")
+    return str(stub)
+
+
 def test_supervisor_restarts_with_backoff(tmp_path):
     """ffmpeg that exits at once -> restart counted, logged, backoff grows, status row queued."""
     idx = Indexer(None)
-    r = StreamRecorder("cam", "main", "/x.mp4", rec_cfg(tmp_path, ffmpeg="false"), idx)
+    r = StreamRecorder("cam", "main", "/x.mp4", rec_cfg(tmp_path, ffmpeg=exits_with_1(tmp_path)), idx)
     r.backoff = Backoff(0.05, 0.2)
     r.start()
     deadline = time.time() + 15
@@ -119,4 +130,4 @@ def test_unlisted_segment_after_kill_is_indexed(tmp_path):
     jobs = []
     while idx.pending():
         jobs.append(idx._q.get_nowait()[2])
-    assert [j.abs_path for j in jobs] == [str(p)]
+    assert [Path(j.abs_path) for j in jobs] == [p]  # Path: root and hour_dir mix separators on Windows

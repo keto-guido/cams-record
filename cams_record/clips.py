@@ -140,15 +140,15 @@ class Clips:
     def cleanup(self):
         for p in self.cache.glob("*.lease"):
             try:
-                if time.time() - p.stat().st_mtime > float(self.cfg["max_age_s"]):
+                if time.time() - p.stat().st_atime > float(self.cfg["max_age_s"]):
                     p.unlink(missing_ok=True)
             except FileNotFoundError:
                 pass  # response completed while cleanup was scanning
-        files = sorted(self.cache.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
+        files = sorted(self.cache.glob("*.mp4"), key=lambda p: p.stat().st_atime)
         total = sum(p.stat().st_size for p in files)
         for p in files:
             size = p.stat().st_size
-            if total > float(self.cfg["max_cache_gb"]) * 1e9 or time.time() - p.stat().st_mtime > self.cfg["max_age_s"]:
+            if total > float(self.cfg["max_cache_gb"]) * 1e9 or time.time() - p.stat().st_atime > self.cfg["max_age_s"]:
                 p.unlink(missing_ok=True)
                 total -= size
 
@@ -165,7 +165,11 @@ class Clips:
             with self.lock:
                 self.cleanup()
                 if target.exists():
-                    target.touch()
+                    # mtime is part of FileResponse's ETag/Last-Modified. Changing it
+                    # makes a phone's next If-Range request restart the whole MP4.
+                    # Keep LRU activity separate from the representation validators.
+                    stat = target.stat()
+                    os.utime(target, ns=(int(time.time() * 1e9), stat.st_mtime_ns))
                     return self._result(target, lease)
             with tempfile.TemporaryDirectory(dir=self.cache) as tmp:
                 listing, output = Path(tmp) / "concat.txt", Path(tmp) / "clip.mp4"

@@ -1,5 +1,7 @@
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -53,7 +55,7 @@ def setup(tmp_path):
     root = tmp_path / "nvr"
     root.mkdir()
     (root / "a.mp4").write_bytes(b"segment")
-    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)},
+    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)}, "access": {"enforce": False},
                               "recording": {"root": str(root), "state_dir": str(tmp_path / "state")}})
     db = Mock()
     db.clip_segments.return_value = ([seg()], 60)
@@ -102,6 +104,36 @@ def test_errors(setup):
     assert response.json()["detail"] == "main quality footage no longer available"
 
 
+@pytest.mark.parametrize("validator", ["etag", "last-modified"])
+def test_phone_continues_conditional_ranges(setup, monkeypatch, validator):
+    cfg, _, client = setup
+
+    def run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(bytes(range(256)) * 16)
+        # Assembly predates the first request; no timing/sleep dependency.
+        os.utime(cmd[-1], (time.time() - 10,) * 2)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("cams_record.clips.subprocess.run", run)
+    url = "/api/clip?camera=cam&start=10&end=40"
+    auth = {"x-apphub-token": tok(["cams"])}
+    first = client.get(url, headers=auth | {"Range": "bytes=0-1"})
+    assert first.status_code == 206
+    cache = Path(cfg["recording"]["state_dir"]) / "clips"
+    received = bytearray(first.content)
+    for start, end in [(2, 1023), (1024, 2047), (2048, 4095)]:
+        response = client.get(url, headers=auth | {
+            "Range": f"bytes={start}-{end}", "If-Range": first.headers[validator]})
+        assert response.status_code == 206
+        assert response.headers["content-range"] == f"bytes {start}-{end}/4096"
+        assert int(response.headers["content-length"]) == end - start + 1
+        assert response.headers[validator] == first.headers[validator]
+        assert response.headers["cache-control"] == "private, no-store"
+        received.extend(response.content)
+    assert received == bytes(range(256)) * 16
+    assert not list(cache.glob("*.lease"))
+
+
 def test_audio_fallback_and_path_safety(setup, monkeypatch):
     cfg, db, _ = setup
     clips = Clips(db, cfg)
@@ -142,6 +174,23 @@ def test_cache_cleanup(setup):
     os.utime(old, (1, 1))
     clips.cleanup()
     assert not old.exists()
+
+
+def test_cache_activity_does_not_change_media_validators(setup):
+    cfg, db, _ = setup
+    clips = Clips(db, cfg)
+    clips.cache.mkdir(parents=True)
+    target = clips.cache / "active.mp4"
+    target.write_bytes(b"clip")
+    os.utime(target, (time.time(), 1))
+    lease = clips._result(target, True)
+    clips.cleanup()
+    assert target.exists() and lease.exists()  # old mtime is not stale activity
+    assert target.stat().st_mtime == 1
+    old = time.time() - clips.cfg["max_age_s"] - 10
+    os.utime(target, (old, 1))
+    clips.cleanup()
+    assert not target.exists() and not lease.exists()
 
 
 def test_clip_audience_and_status_boundary(setup):
@@ -200,6 +249,35 @@ def test_real_ffmpeg_concat(setup, tmp_path):
     info = json.loads(result.stdout)
     assert 3 <= float(info["format"]["duration"]) <= 5
     assert {s["codec_type"] for s in info["streams"]} == {"video", "audio"}
+
+
+@needs_ffmpeg
+def test_native_mp4_ranges_decode_past_source_boundary(setup, tmp_path):
+    cfg, db, client = setup
+    cfg["recording"]["ffmpeg"] = "ffmpeg"
+    root = Path(cfg["recording"]["root"])
+    make_clip(root / "a.mp4", 3)
+    make_clip(root / "b.mp4", 4)
+    db.clip_segments.return_value = ([seg(100, 103) | {"path": "a.mp4", "codec": "h264"},
+                                      seg(103, 107) | {"path": "b.mp4", "codec": "h264"}], 107)
+    url = "/api/clip?camera=cam&start=100&end=107"
+    auth = {"x-apphub-token": tok(["cams"])}
+    first = client.get(url, headers=auth | {"Range": "bytes=0-1"})
+    assert first.status_code == 206
+    size = int(first.headers["content-range"].split("/")[1])
+    content = bytearray(first.content)
+    for start in range(2, size, 4096):
+        response = client.get(url, headers=auth | {
+            "Range": f"bytes={start}-{min(size - 1, start + 4095)}", "If-Range": first.headers["etag"]})
+        assert response.status_code == 206
+        content.extend(response.content)
+    output = tmp_path / "phone.mp4"
+    output.write_bytes(content)
+    decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(output), "-map", "0:v:0",
+                              "-f", "framemd5", "-"], capture_output=True, text=True, check=True)
+    frames = [line for line in decoded.stdout.splitlines() if line and not line.startswith("#")]
+    assert len(frames) == 70  # All seven seconds, across the three-second source boundary.
+    assert not decoded.stderr
 
 
 @pytest.mark.parametrize("start,end", [(6, 18), (16, 28), (26, 38)])

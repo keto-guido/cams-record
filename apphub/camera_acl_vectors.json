@@ -1,0 +1,48 @@
+{
+  "registry": [
+    {"id": "open", "name": "Open"},
+    {"id": "empty", "name": "Empty lists", "users": [], "roles": []},
+    {"id": "by-user", "name": "By user", "users": ["ann"]},
+    {"id": "by-role", "name": "By role", "roles": ["family"]},
+    {"id": "both", "name": "Both", "users": ["ann"], "roles": ["family"]},
+    {"id": "null-users", "name": "Null list", "users": null},
+    {"id": "string-users", "name": "String list", "users": "ann"},
+    {"id": "blank-role", "name": "Blank member", "roles": [""]},
+    {"id": "mixed-list", "name": "Bad list beside good", "users": ["ann"], "roles": [7]},
+    {"id": "aliased", "name": "Open, shares a stream", "snap": "shared-raw"},
+    {"id": "aliased-private", "name": "Private, shares a stream", "snap": "shared-raw", "users": ["ann"]},
+    {"id": "dupe", "name": "First"},
+    {"id": "dupe", "name": "Second", "users": ["ann"]},
+    {"id": "Bad_ID", "name": "Rejected id"},
+    {"id": "trailing-", "name": "Rejected id"},
+    {"id": "no-name"},
+    {"id": "bad-snap", "name": "Rejected snap", "snap": "rtsp://user:pw@host/x"},
+    {"id": "dots-snap", "name": "Rejected snap", "snap": "a..b"},
+    {"id": "null-snap", "name": "Rejected snap", "snap": null},
+    {"id": "bad-duplicate", "name": "Valid"},
+    {"id": "bad-duplicate"},
+    {"id": "snap-duplicate", "name": "Valid"},
+    {"id": "snap-duplicate", "name": "Malformed", "snap": null},
+    "not an object",
+    ["not", "an", "object"],
+    null
+  ],
+  "ids": ["open", "empty", "by-user", "by-role", "both", "null-users", "string-users", "blank-role", "mixed-list", "aliased", "aliased-private"],
+  "access": [
+    {"user": "bob", "roles": ["cams"], "allowed": ["open", "empty", "aliased"]},
+    {"user": "ann", "roles": ["cams"], "allowed": ["open", "empty", "by-user", "both", "aliased", "aliased-private"]},
+    {"user": "kim", "roles": ["cams", "family"], "allowed": ["open", "empty", "by-role", "both", "aliased"]},
+    {"user": "ANN", "roles": ["Family"], "allowed": ["open", "empty", "aliased"]},
+    {"user": "root", "roles": ["admin"], "allowed": ["open", "empty", "by-user", "by-role", "both", "null-users", "string-users", "blank-role", "mixed-list", "aliased", "aliased-private"]},
+    {"user": "", "roles": ["admin"], "allowed": []}
+  ],
+  "streams": [
+    {"name": "shared-raw", "user": "bob", "roles": ["cams"], "allowed": false},
+    {"name": "shared-raw", "user": "ann", "roles": ["cams"], "allowed": true},
+    {"name": "shared-raw", "user": "root", "roles": ["admin"], "allowed": true},
+    {"name": "open", "user": "bob", "roles": ["cams"], "allowed": true},
+    {"name": "by-user", "user": "bob", "roles": ["cams"], "allowed": false},
+    {"name": "not-registered", "user": "root", "roles": ["admin"], "allowed": false}
+  ],
+  "broken_files": ["", "{not json", "{}", "\"open\"", "null"]
+}

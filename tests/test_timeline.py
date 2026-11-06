@@ -14,7 +14,13 @@ from tests.test_web import tok
 
 setup = clip_setup
 
-HEADERS = {'x-apphub-token': tok(['cams'])}
+HEADERS = {}
+
+
+@pytest.fixture(autouse=True)
+def fresh_viewer_token():
+    # Collection precedes the multi-minute recording integration test. Mint identity per test.
+    HEADERS['x-apphub-token'] = tok(['cams'])
 
 
 def rows():

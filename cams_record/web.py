@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.background import BackgroundTask
 
 from .auth import Authenticator, AuthError, Principal
+from .camera_access import CameraAccess, Viewer
 from .clips import ClipError, Clips, merge_spans, parse_time, validate_window
 from .config import CAMERA_ID_RE
 from .db import DBUnavailable
@@ -87,19 +88,30 @@ def create_app(service, cfg: dict):
         if not got or got != secret:
             raise HTTPException(401, "invalid webhook secret")
 
-    def window(camera, start, end):
+    access = CameraAccess(cfg["access"], getattr(service, "cameras", {}))
+
+    def viewer(request: Request) -> Viewer:
+        # Identity is the signed JWT; the hub's x-apphub-user header must only agree with it.
+        principal = clip_user(request)
+        return Viewer(principal.sub, tuple(principal.roles), request.headers.get("x-apphub-user"))
+
+    # Every camera route gets its id through window(), range_window() or a direct require(), so the
+    # id that was authorized is the id that gets served, whichever of cam/camera the client sent.
+    def window(who, camera, start, end):
         if not CAMERA_ID_RE.fullmatch(camera):
             raise ClipError(400, "invalid camera id")
+        access.require(camera, who)
         start, end = parse_time(start), parse_time(end)
         validate_window(start, end)
         return start, end
 
     r = APIRouter()
 
-    def range_window(cam, camera, start, end, limit, default=False):
+    def range_window(who, cam, camera, start, end, limit, default=False):
         camera = cam or camera or ""
         if not CAMERA_ID_RE.fullmatch(camera):
             raise ClipError(400, "invalid camera id")
+        access.require(camera, who)
         if start is None and end is None and default:
             day = datetime.now(ZoneInfo(cfg["clips"]["timezone"])).replace(hour=0, minute=0, second=0, microsecond=0)
             start, end = day.timestamp(), (day + timedelta(days=1)).timestamp()
@@ -117,8 +129,8 @@ def create_app(service, cfg: dict):
 
     @r.get("/api/timeline")
     def timeline(cam: str | None = None, camera: str | None = None, start: str | None = None,
-                 end: str | None = None, _: Principal = Depends(clip_user)):
-        camera, start, end = range_window(cam, camera, start, end, 8 * 86400, True)
+                 end: str | None = None, who: Viewer = Depends(viewer)):
+        camera, start, end = range_window(who, cam, camera, start, end, 8 * 86400, True)
         spans, latest = {}, {}
         for quality in ("main", "sub"):
             rows = indexed(camera, quality, start, end)
@@ -128,31 +140,32 @@ def create_app(service, cfg: dict):
         return dict(cam=camera, start=start, end=end, gap_tolerance_s=clips.cfg["gap_tolerance_s"],
                     spans=spans, latest=latest)
 
-    def playback_data(cam, camera, start, end):
-        camera, start, end = range_window(cam, camera, start, end, 26 * 3600, True)
+    def playback_data(who, cam, camera, start, end):
+        camera, start, end = range_window(who, cam, camera, start, end, 26 * 3600, True)
         entries = playback_entries(indexed(camera, "sub", start, end), start, end,
                                    clips.cfg["gap_tolerance_s"])
         return camera, start, end, entries
 
     @r.get("/api/playback")
     def playback(cam: str | None = None, camera: str | None = None, start: str | None = None,
-                 end: str | None = None, _: Principal = Depends(clip_user)):
-        camera, start, end, entries = playback_data(cam, camera, start, end)
+                 end: str | None = None, who: Viewer = Depends(viewer)):
+        camera, start, end, entries = playback_data(who, cam, camera, start, end)
         return dict(cam=camera, start=start, end=end, duration=sum(e["duration"] for e in entries),
                     playlist=f"hls/{camera}/index.m3u8?start={start}&end={end}",
                     segments=[{k: v for k, v in e.items() if k != "codec"} for e in entries])
 
     @r.get("/api/hls/{cam}/index.m3u8")
     def hls_playlist(cam: str, start: str | None = None, end: str | None = None,
-                     _: Principal = Depends(clip_user)):
-        _, _, _, entries = playback_data(cam, None, start, end)
+                     who: Viewer = Depends(viewer)):
+        _, _, _, entries = playback_data(who, cam, None, start, end)
         if not entries:
             raise ClipError(404, "no recorded segments")
         return PlainTextResponse(playlist(entries),
                                  media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store"})
 
     @r.get("/api/hls/{cam}/seg/{segment_id}.ts")
-    def hls_segment(cam: str, segment_id: int, o: str | None = None, _: Principal = Depends(clip_user)):
+    def hls_segment(cam: str, segment_id: int, o: str | None = None, who: Viewer = Depends(viewer)):
+        access.require(cam, who)  # media.ts() then refuses a segment_id belonging to any other camera
         if o is None or not re.fullmatch(r"[0-9]{1,9}", o) or int(o) > MAX_SEGMENT_OFFSET_MS:
             raise ClipError(400, "invalid segment offset")
         if service.db is None:
@@ -171,14 +184,14 @@ def create_app(service, cfg: dict):
                     "sub" if sub["status"] == "available" else None)
 
     @r.get("/api/export/info")
-    def export_info(cam: str, start: str, end: str, _: Principal = Depends(clip_user)):
-        camera, start, end = range_window(cam, None, start, end, clips.cfg["export_max_s"])
+    def export_info(cam: str, start: str, end: str, who: Viewer = Depends(viewer)):
+        camera, start, end = range_window(who, cam, None, start, end, clips.cfg["export_max_s"])
         return export_info_data(camera, start, end)
 
     @r.get("/api/export")
     def export(cam: str, start: str, end: str, quality: Literal["main", "sub"] = "main",
-               fallback: Literal["0", "1"] = "1", _: Principal = Depends(clip_user)):
-        camera, start, end = range_window(cam, None, start, end, clips.cfg["export_max_s"])
+               fallback: Literal["0", "1"] = "1", who: Viewer = Depends(viewer)):
+        camera, start, end = range_window(who, cam, None, start, end, clips.cfg["export_max_s"])
         if not media.export_slot.acquire(blocking=False):
             return JSONResponse({"detail": "another export is in progress"}, status_code=429,
                                 headers={"Retry-After": "15"})
@@ -207,17 +220,18 @@ def create_app(service, cfg: dict):
 
     @r.get("/api/clip/info")
     def clip_info(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
-                  download: Literal["0", "1"] = "0", _: Principal = Depends(clip_user)):
-        start, end = window(camera, start, end)
+                  download: Literal["0", "1"] = "0", who: Viewer = Depends(viewer)):
+        start, end = window(who, camera, start, end)
         return {q: clips.availability(camera, q, start, end)[0] for q in ("sub", "main")}
 
     @r.get("/api/clip")
     def clip(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
-             download: Literal["0", "1"] = "0", _: Principal = Depends(clip_user)):
-        start, end = window(camera, start, end)
+             download: Literal["0", "1"] = "0", who: Viewer = Depends(viewer)):
+        start, end = window(who, camera, start, end)
         path = clips.build(camera, quality, start, end, lease=True)
         stamp = datetime.fromtimestamp(start, ZoneInfo(cfg["clips"]["timezone"])).strftime("%Y%m%d-%H%M%S")
         return FileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{quality}.mp4",
+                            headers={"Cache-Control": "private, no-store"},
                             content_disposition_type="attachment" if download == "1" else "inline",
                             background=BackgroundTask(path.unlink, missing_ok=True))
 
@@ -295,7 +309,7 @@ def create_app(service, cfg: dict):
             raise HTTPException(exc.status, exc.detail) from exc
 
     @r.get("/api/push/event-context/{event_id}")
-    def push_event_context(event_id: str, _: Principal = Depends(clip_user)):
+    def push_event_context(event_id: str, who: Viewer = Depends(viewer)):
         """Authorized deep-link helper: metadata only (no snapshots/images)."""
         try:
             eid = normalize_event_id(event_id)
@@ -307,7 +321,7 @@ def create_app(service, cfg: dict):
             row = service.db.detection_event_by_id(eid)
         except DBUnavailable as exc:
             raise HTTPException(503, "database unavailable") from exc
-        if not row:
+        if not row or (access.enforce and not access.allowed(row["camera_id"], who)):
             raise HTTPException(404, "event not found")
         from urllib.parse import quote
 
