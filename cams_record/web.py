@@ -22,6 +22,9 @@ from .push import DetectionEvent, PushError, PushService, normalize_event_id
 
 log = logging.getLogger(__name__)
 
+# Access-controlled export media and metadata must not be stored in shared caches.
+PRIVATE_NO_STORE = {"Cache-Control": "private, no-store"}
+
 
 class CleanupFileResponse(FileResponse):
     """Release disposable files even when sending fails or is cancelled."""
@@ -186,7 +189,7 @@ def create_app(service, cfg: dict):
     @r.get("/api/export/info")
     def export_info(cam: str, start: str, end: str, who: Viewer = Depends(viewer)):
         camera, start, end = range_window(who, cam, None, start, end, clips.cfg["export_max_s"])
-        return export_info_data(camera, start, end)
+        return JSONResponse(export_info_data(camera, start, end), headers=PRIVATE_NO_STORE)
 
     @r.get("/api/export")
     def export(cam: str, start: str, end: str, quality: Literal["main", "sub"] = "main",
@@ -194,7 +197,7 @@ def create_app(service, cfg: dict):
         camera, start, end = range_window(who, cam, None, start, end, clips.cfg["export_max_s"])
         if not media.export_slot.acquire(blocking=False):
             return JSONResponse({"detail": "another export is in progress"}, status_code=429,
-                                headers={"Retry-After": "15"})
+                                headers={**PRIVATE_NO_STORE, "Retry-After": "15"})
         try:
             info = export_info_data(camera, start, end)
             if (quality == "main" and info["main"]["status"] == "gone" and fallback == "1"
@@ -216,7 +219,7 @@ def create_app(service, cfg: dict):
         stamp = datetime.fromtimestamp(start, zone).strftime("%Y%m%d-%H%M%S")
         stop = datetime.fromtimestamp(end, zone).strftime("%H%M%S")
         return CleanupFileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{stop}_{quality}.mp4",
-                                   headers={"Cache-Control": "private, no-store", "X-Export-Quality": quality},
+                                   headers={**PRIVATE_NO_STORE, "X-Export-Quality": quality},
                                    cleanup=finish)
 
     @r.get("/api/clip/info")
@@ -232,7 +235,7 @@ def create_app(service, cfg: dict):
         path = clips.build(camera, quality, start, end, lease=True)
         stamp = datetime.fromtimestamp(start, ZoneInfo(cfg["clips"]["timezone"])).strftime("%Y%m%d-%H%M%S")
         return FileResponse(path, media_type="video/mp4", filename=f"{camera}_{stamp}_{quality}.mp4",
-                            headers={"Cache-Control": "private, no-store"},
+                            headers=dict(PRIVATE_NO_STORE),
                             content_disposition_type="attachment" if download == "1" else "inline",
                             background=BackgroundTask(path.unlink, missing_ok=True))
 
@@ -241,8 +244,10 @@ def create_app(service, cfg: dict):
         payload = {"detail": exc.detail}
         if exc.status == 425:
             payload["retry_after"] = 10
-        return JSONResponse(payload, status_code=exc.status,
-                            headers={"Retry-After": "10"} if exc.status == 425 else None)
+        headers = dict(PRIVATE_NO_STORE) if "/api/export" in request.url.path else {}
+        if exc.status == 425:
+            headers["Retry-After"] = "10"
+        return JSONResponse(payload, status_code=exc.status, headers=headers or None)
 
     @app.exception_handler(DBUnavailable)
     async def db_exc(request: Request, exc: DBUnavailable):
