@@ -89,41 +89,8 @@ def can_access(camera: Camera | None, user: str, roles) -> bool:
     return not camera.restricted or user in camera.users or bool(camera.roles.intersection(roles))
 
 
-def is_configured_stream_helper(camera_id: str, sources: dict[str, tuple[str, ...]]) -> bool:
-    """True when ``camera_id`` is only a go2rtc source name for a logical camera.
-
-    Parent relation comes from cameras.yaml ``main_stream`` / ``sub_stream`` tuples, not from
-    stripping a ``-main`` suffix. A logical camera whose own id ends in ``-main`` has
-    ``camera_id in sources`` and is never treated as a helper.
-    """
-    if camera_id in sources:
-        return False
-    return any(camera_id in srcs for srcs in sources.values())
-
-
-def publishable_cameras(cameras: dict[str, Camera],
-                        sources: dict[str, tuple[str, ...]] | None = None) -> list[Camera]:
-    """Registry cameras that belong in the shared App Hub list/publication.
-
-    Live grid and ``/cams/api/list`` must expose logical cameras only. When ``sources`` (the
-    cameras.yaml id → stream tuple map) is provided, registry rows that exist solely as another
-    camera's ``main_stream`` / ``sub_stream`` name are omitted — including mismatched helpers
-    such as ``main-st-south`` / ``main-st-south-main``. Logical ids that happen to end in
-    ``-main`` are kept. Without ``sources``, every registry row is returned; App Hub must keep
-    helpers out of ``cams.json`` rather than inventing a suffix filter.
-    """
-    if sources is None:
-        return list(cameras.values())
-    return [c for c in cameras.values() if not is_configured_stream_helper(c.id, sources)]
-
-
 def can_stream(cameras: dict[str, Camera], name: str, user: str, roles) -> bool:
-    """A go2rtc stream is the same footage as every camera using it as id or snap: all must allow it.
-
-    Exact id/snap ownership only. Recorder configured-stream inheritance lives in
-    ``CameraAccess`` (cameras.yaml ``main_stream`` / ``sub_stream``), not here, so App Hub live
-    ``canStream`` stays exact until its twin is refreshed separately.
-    """
+    """A go2rtc stream is the same footage as every camera using it as id or snap: all must allow it."""
     owners = [c for c in cameras.values() if name in (c.id, c.snap)]
     return bool(owners) and all(can_access(c, user, roles) for c in owners)
 
@@ -166,45 +133,36 @@ class CameraAccess:
         self.enforce = cfg["enforce"]
         self.registry = CameraRegistry(cfg["registry_file"])
 
-    def _stream_owners(self, cameras: dict[str, Camera], name: str) -> list[Camera]:
-        """Registry owners of a stream name via id/snap or cameras.yaml source mapping.
-
-        Any go2rtc name listed as a logical camera's ``main_stream`` or ``sub_stream`` inherits
-        that camera's registry ACL. Stream names need not equal ``<id>-main`` or the camera id
-        (e.g. logical ``main-street`` with ``sub_stream: main-st-south``). No configured owner
-        and no id/snap hit means unknown/denied — including for admins. Stale helper registry
-        rows still count as owners when present (migration).
-        """
-        owners = [c for c in cameras.values() if name in (c.id, c.snap)]
-        seen = {o.id for o in owners}
-        for cid in self.source_owners.get(name, ()):
-            parent = cameras.get(cid)
-            if parent is not None and parent.id not in seen:
-                owners.append(parent)
-                seen.add(parent.id)
-        return owners
-
-    def _can_source(self, cameras: dict[str, Camera], name: str, who: Viewer) -> bool:
-        owners = self._stream_owners(cameras, name)
-        return bool(owners) and all(can_access(c, who.user, who.roles) for c in owners)
-
-    def publishable(self) -> list[Camera]:
-        """App Hub list/publication view using this recorder's cameras.yaml source map."""
-        return publishable_cameras(self.registry.current(), self.sources)
-
     def allowed(self, camera: str, who: Viewer) -> bool:
+        """Authorize a logical camera for recorded footage (timeline/export/clip/…).
+
+        - Parent camera id must pass registry ``can_stream`` (exact id/snap).
+        - Every cameras.yaml ``main_stream`` / ``sub_stream`` keeps all ``source_owners`` grants
+          via ``can_stream(owner)``.
+        - If a source is an explicit registered id or snap, also require ``can_stream(src)``
+          exactly (do not weaken shared/restricted stream auth).
+        - If a source is only a config alias (not registered as id/snap), inherit those parent
+          ``source_owners`` grants — no helper registry row and no ``-main`` suffix stripping.
+        - Missing cameras.yaml mapping or unknown camera denies, including for admins.
+        - Requesting ``cam=<helper>`` without a registry row does not inherit parent capability.
+        """
         if who.claimed_user is not None and who.claimed_user != who.user:
             return False
         cameras = self.registry.current()
         sources = self.sources.get(camera)
-        # Camera id itself must be a real registry entry. Configured stream names inherit via
-        # _stream_owners; requesting cam=<stream-helper> without a registry row does not gain
-        # the parent's capabilities.
-        return (camera in cameras and bool(sources)
-                and self._can_source(cameras, camera, who)
-                and all(self._can_source(cameras, src, who)
-                        and all(self._can_source(cameras, owner, who)
-                                for owner in self.source_owners[src]) for src in sources))
+        if not (camera in cameras and bool(sources)):
+            return False
+        user, roles = who.user, who.roles
+        if not can_stream(cameras, camera, user, roles):
+            return False
+        for src in sources:
+            owners = self.source_owners[src]
+            if not all(can_stream(cameras, owner, user, roles) for owner in owners):
+                return False
+            if any(src in (c.id, c.snap) for c in cameras.values()):
+                if not can_stream(cameras, src, user, roles):
+                    return False
+        return True
 
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):
