@@ -98,6 +98,20 @@ def test_admin_only_export_decisions():
     assert not can_access(reg["cam-1"], "ann", ["cams", "family"])
 
 
+def test_record_camera_preserves_sub_only_recording():
+    """A camera with only a sub stream and use.record=('sub',) must still record that stream."""
+    cam = CameraObject(
+        id="porch", name="Porch",
+        streams={"sub": Stream("sub", "porch")},
+        use={"live": ("sub",), "record": ("sub",)},
+    )
+    assert cam.validate() == []
+    rc = record_camera(cam)
+    assert rc.main_stream == "porch" and rc.sub_stream == "porch"
+    assert rc.record_main is False and rc.record_sub is True and rc.enabled is True
+    assert rc.streams() == [("sub", "porch")]
+
+
 # ---- import ------------------------------------------------------------------------
 
 def test_import_consistent_files_is_equivalent():

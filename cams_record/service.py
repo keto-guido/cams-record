@@ -139,12 +139,18 @@ class Service:
                     log.error("cams.json not published (the previous file stays in place): %s", exc)
                 self.registry_status["error"] = str(exc)
 
+    def _registry_needs_retry(self) -> bool:
+        """True when a previous cams.json publish failed and should be attempted again."""
+        return bool(self.registry_status["enabled"] and self.registry_status["error"])
+
     def _source_loop(self) -> None:
         self.on_camera_objects()  # initial state: shadow report, or publish the registry
         interval = float(self.cfg["cams_config"]["poll_s"])
         while not self._stop.wait(interval):
             try:
-                if self.source.poll():
+                # Retry a failed registry write even when camera objects/revision did not change,
+                # so revocations cannot stay stale after a transient filesystem error.
+                if self.source.poll() or self._registry_needs_retry():
                     self.on_camera_objects()
             except Exception:  # noqa: BLE001  (never let this thread die)
                 log.exception("cams_config: applying camera objects failed")

@@ -70,12 +70,17 @@ class CameraSource:
         self.last_error = ""
         if rev == self.revision and self.origin == "db":
             return False
+        # First successful load from an uninitialized source must apply even when the DB is empty,
+        # so db mode can drop the cameras.yaml fallback.
+        first_load = self.origin is None
         before = {k: c.to_dict() for k, c in self.cameras.items()}
         try:
             self._load_db()
         except Exception as exc:  # noqa: BLE001
             self._failed(exc)
             return False
+        if first_load:
+            return True
         # A revision bump that changed nothing (e.g. an identical save) needs no re-apply.
         return before != {k: c.to_dict() for k, c in self.cameras.items()}
 

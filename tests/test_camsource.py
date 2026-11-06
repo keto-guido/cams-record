@@ -104,6 +104,25 @@ def test_source_without_db_or_cache(tmp_path):
     assert src.load_initial() is False
 
 
+def test_poll_first_empty_db_load_is_changed(tmp_path, fake_recorders):
+    """Starting with no DB/cache, the first successful load of an empty authoritative DB must apply."""
+    store = FlakyStore()  # empty cams_config, revision 1
+    store.down = True
+    src = CameraSource({}, None, store=store)
+    assert not src.load_initial() and src.origin is None and src.cameras == {}
+
+    cfg = make_cfg(tmp_path, camera_source="db")
+    svc = Service(cfg, {"front-door": file_cam()}, source=src)
+    svc.on_camera_objects()  # nothing loaded: keep recording from cameras.yaml
+    assert set(svc.recorders) == {"front-door/main", "front-door/sub"}
+
+    store.down = False
+    assert src.poll() is True  # empty→empty still counts as the first authoritative load
+    assert src.origin == "db" and src.cameras == {}
+    svc.on_camera_objects()
+    assert svc.recorders == {}  # file fallback applied away
+
+
 # ---- shadow differences ---------------------------------------------------------------
 
 def test_record_differences():
@@ -253,6 +272,48 @@ def test_publish_refuses_to_drop_a_camera_and_keeps_old_file(tmp_path):
     assert publish_registry(path, {"garage": cam("garage")}) is True
     assert publish_registry(path, {"garage": cam("garage")}) is False
     assert json.loads(registry_text({"garage": cam("garage")})) == json.loads(path.read_text())
+
+
+def test_registry_retries_after_transient_failure_without_revision_change(tmp_path, fake_recorders, monkeypatch):
+    """A failed cams.json write must retry on the next poll even when the revision is unchanged."""
+    from cams_record.camconfig import publish as publish_mod
+
+    cfg = make_cfg(tmp_path, camera_source="db", access={"publish_registry": True})
+    # Revocation: garage was public, now restricted to family only.
+    store = FlakyStore({"garage": cam("garage", visibility="restricted", roles=("family",))})
+    src = CameraSource({}, None, store=store)
+    src.load_initial()
+    svc = Service(cfg, {}, source=src)
+    reg_path = cfg["access"]["registry_file"]
+    with open(reg_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps([{"id": "garage", "name": "Garage"}]) + "\n")  # stale open grant
+
+    calls = {"n": 0}
+    real = publish_mod.publish_registry
+
+    def flaky(path, objects):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real(path, objects)
+
+    # on_camera_objects imports publish_registry from this module at call time.
+    monkeypatch.setattr(publish_mod, "publish_registry", flaky)
+
+    svc.on_camera_objects()
+    assert calls["n"] == 1
+    assert svc.registry_status["error"] == "disk full"
+    assert svc.registry_status["published_revision"] is None
+    assert json.loads(open(reg_path).read()) == [{"id": "garage", "name": "Garage"}]  # stale file kept
+    assert set(svc.recorders) == {"garage/main", "garage/sub"}  # cameras still applied
+
+    assert src.poll() is False  # no config revision change
+    assert svc._registry_needs_retry() is True
+    svc.on_camera_objects()  # what _source_loop does when retry is pending
+    assert calls["n"] == 2
+    assert svc.registry_status == {"enabled": True, "error": None, "published_revision": 1}
+    assert json.loads(open(reg_path).read()) == [{"id": "garage", "name": "Garage", "roles": ["family"]}]
+    assert svc._registry_needs_retry() is False
 
 
 def test_status_endpoint_reports_camera_source(tmp_path, fake_recorders):

@@ -16,8 +16,10 @@ DETECT_STREAM_KEYS = ("name", "stream", "main_stream")
 def record_camera(cam: CameraObject) -> CameraConfig:
     """cams-record's CameraConfig: main/sub names (also used to authorize old footage) and what to record."""
     names = {k: s.go2rtc_name for k, s in cam.streams.items()}
+    # Keep the sub mapping even when there is no main stream (sub-only cameras still record as sub).
+    # main_stream falls back to the sub name so old footage keyed by that stream stays authorizable.
     main = names.get("main") or names.get("sub") or cam.id
-    sub = names.get("sub") if "main" in names else None
+    sub = names.get("sub")
     record = cam.effective_use().get("record") or ()
     return CameraConfig(id=cam.id, main_stream=main, sub_stream=sub, enabled=bool(record) and cam.enabled,
                         record_main="main" in record, record_sub="sub" in record and sub is not None)
