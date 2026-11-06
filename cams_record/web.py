@@ -226,7 +226,8 @@ def create_app(service, cfg: dict):
     def clip_info(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
                   download: Literal["0", "1"] = "0", who: Viewer = Depends(viewer)):
         start, end = window(who, camera, start, end)
-        return {q: clips.availability(camera, q, start, end)[0] for q in ("sub", "main")}
+        body = {q: clips.availability(camera, q, start, end)[0] for q in ("sub", "main")}
+        return JSONResponse(body, headers=PRIVATE_NO_STORE)
 
     @r.get("/api/clip")
     def clip(camera: str, start: str, end: str, quality: Literal["sub", "main"] = "sub",
@@ -244,7 +245,9 @@ def create_app(service, cfg: dict):
         payload = {"detail": exc.detail}
         if exc.status == 425:
             payload["retry_after"] = 10
-        headers = dict(PRIVATE_NO_STORE) if "/api/export" in request.url.path else {}
+        # Export/clip media and metadata are access-controlled; keep errors out of shared caches too.
+        path = request.url.path
+        headers = dict(PRIVATE_NO_STORE) if ("/api/export" in path or "/api/clip" in path) else {}
         if exc.status == 425:
             headers["Retry-After"] = "10"
         return JSONResponse(payload, status_code=exc.status, headers=headers or None)

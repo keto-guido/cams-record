@@ -87,6 +87,7 @@ def test_clip_api_auth_range_cache(setup, monkeypatch):
     assert len(calls) == 1
     info = client.get(url.replace("/clip?", "/clip/info?"), headers=headers)
     assert info.json() == {"sub": "available", "main": "available"}
+    assert info.headers["cache-control"] == "private, no-store"
 
 
 def test_errors(setup):
@@ -94,14 +95,21 @@ def test_errors(setup):
     headers = {"x-apphub-token": tok(["cams"])}
     url = "/api/clip?camera=cam&quality=main&start=10&end="
     for end in ("10", "9", "311", "nan", "bogus"):
-        assert client.get(url + end, headers=headers).status_code == 400
+        response = client.get(url + end, headers=headers)
+        assert response.status_code == 400
+        assert response.headers["cache-control"] == "private, no-store"
+    bad_info = client.get("/api/clip/info?camera=cam&start=10&end=9", headers=headers)
+    assert bad_info.status_code == 400
+    assert bad_info.headers["cache-control"] == "private, no-store"
     db.clip_segments.return_value = ([seg()], 60)
     response = client.get(url + "80", headers=headers)
     assert response.status_code == 425 and response.json()["retry_after"] == 10
+    assert response.headers["cache-control"] == "private, no-store"
     db.clip_segments.return_value = ([seg(deleted_at=True)], 60)
     response = client.get(url + "40", headers=headers)
     assert response.status_code == 404
     assert response.json()["detail"] == "main quality footage no longer available"
+    assert response.headers["cache-control"] == "private, no-store"
 
 
 @pytest.mark.parametrize("validator", ["etag", "last-modified"])

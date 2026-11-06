@@ -30,6 +30,15 @@ class AuthError(Exception):
         self.detail = detail
 
 
+def _nonblank_str(value) -> str | None:
+    """Return value when it is a non-blank string; otherwise None."""
+    if not isinstance(value, str):
+        return None
+    if not value.strip():
+        return None
+    return value
+
+
 class Authenticator:
     def __init__(self, auth_cfg: dict):
         self.cfg = auth_cfg
@@ -60,15 +69,22 @@ class Authenticator:
             raise AuthError(401, "token expired") from exc
         except jwt.InvalidTokenError as exc:
             raise AuthError(401, f"invalid token: {exc.__class__.__name__}") from exc
-        roles = claims.get("roles") or []
+        # Fail closed at the auth boundary: never invent a subject like "?". Empty principals
+        # would otherwise bypass camera ACL empty-user denial when the token carries admin.
+        sub = _nonblank_str(claims.get("sub"))
+        if sub is None:
+            raise AuthError(401, "invalid token: missing subject")
+        roles = claims.get("roles")
+        if roles is None:
+            roles = []
         if isinstance(roles, str):
             roles = [roles]
-        if not isinstance(roles, list):
-            roles = []
-        roles = [str(r) for r in roles]
+        if not isinstance(roles, list) or any(_nonblank_str(r) is None for r in roles):
+            raise AuthError(401, "invalid token: invalid roles")
+        roles = list(roles)
         if not set(allowed_roles or ["admin"]) & set(roles):
             raise AuthError(403, "required role missing")
-        return Principal(sub=str(claims.get("sub") or claims.get("username") or "?"), roles=roles)
+        return Principal(sub=sub, roles=roles)
 
     def authenticate(self, headers, allowed_roles=None) -> Principal:
         if self.mode == "none":
