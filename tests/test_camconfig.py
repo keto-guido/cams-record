@@ -146,6 +146,17 @@ def test_import_conflict_record_main_defaults_to_sub():
     assert "front-door" not in plan.cameras
 
 
+def test_import_sub_only_camera_is_not_a_conflict():
+    """main_stream == sub_stream is fine when only the sub stream is recorded (export-files writes this)."""
+    record = {"cameras": {"porch-cam": {"main_stream": "porch-cam", "sub_stream": "porch-cam",
+                                         "record_main": False, "record_sub": True}}}
+    plan, text = _plan(detect={}, record=record, reg=[{"id": "porch-cam", "name": "Porch"}])
+    assert plan.conflicts == []
+    cam = plan.cameras["porch-cam"]
+    assert set(cam.streams) == {"sub"} and cam.use["record"] == ("sub",)
+    assert check_plan(plan, {}, record, text) == []
+
+
 def test_import_conflict_hires_stream_mismatch():
     record = {"cameras": {"front-door": {"main_stream": "front-door-4k", "sub_stream": "front-door"}}}
     plan, _ = _plan(record=record)

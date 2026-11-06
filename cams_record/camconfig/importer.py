@@ -99,8 +99,11 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
         plan.conflicts.append(f"{cid}: cams-record main_stream is a URL or file ({main!r})")
         return None
     if main is not None and main == sub:
-        plan.conflicts.append(f"{cid}: main_stream and sub_stream are the same stream {main!r}; "
-                              "set cams-record main_stream to the high-resolution stream")
+        if rc is not None and not any(q == "main" for q, _ in rc.streams()):
+            main = None  # a sub-only camera (as export-files writes one): nothing is recorded as main
+        else:
+            plan.conflicts.append(f"{cid}: main_stream and sub_stream are the same stream {main!r}; "
+                                  "set cams-record main_stream to the high-resolution stream")
     if d is not None and rc is not None:
         if d_sub not in (sub, main):
             plan.conflicts.append(f"{cid}: cams-detect detects on {d_sub!r}, which cams-record does not know "
