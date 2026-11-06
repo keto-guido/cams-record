@@ -56,6 +56,47 @@ def db():
     d.close()
 
 
+CFG_DB = {
+    "host": os.environ.get("CAMS_TEST_DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("CAMS_TEST_DB_PORT", "3306")),
+    "user": os.environ.get("CAMS_TEST_DB_USER", "cams_record"),
+    "password": os.environ.get("CAMS_TEST_DB_PASSWORD", "cams_record"),
+    "database": os.environ.get("CAMS_TEST_CONFIG_DB_NAME", "cams_config_test"),
+    "connect_timeout": 2,
+}
+
+
+def _config_db_unavailable() -> str | None:
+    try:
+        import pymysql
+
+        pymysql.connect(**CFG_DB).close()
+    except Exception as exc:  # noqa: BLE001
+        return f"MariaDB {CFG_DB['database']} not reachable ({exc.__class__.__name__})"
+    return None
+
+
+@pytest.fixture
+def store():
+    reason = _config_db_unavailable()
+    if reason:
+        pytest.skip(reason)
+    import pymysql
+
+    from cams_record.camconfig.schema import TABLES
+    from cams_record.camconfig.store import CamConfigStore, open_db
+
+    conn = pymysql.connect(**CFG_DB, autocommit=True)
+    with conn.cursor() as cur:
+        for t in TABLES:
+            cur.execute(f"DROP TABLE IF EXISTS {t}")
+    conn.close()
+    db = open_db(CFG_DB)
+    db.ensure_schema()
+    yield CamConfigStore(db)
+    db.close()
+
+
 needs_ffmpeg = pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
                                   reason="ffmpeg/ffprobe not installed")
 

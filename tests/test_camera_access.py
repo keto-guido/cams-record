@@ -62,7 +62,14 @@ def test_node_twin_passes_same_vectors():
 def test_config():
     assert DEFAULTS["access"]["enforce"] is True
     cfg = apply_env(deep_merge(DEFAULTS, None), {"ACCESS_REGISTRY_FILE": "/x/cams.json", "ACCESS_ENFORCE": "0"})
-    assert validate(cfg)["access"] == {"enforce": False, "registry_file": "/x/cams.json"}
+    assert validate(cfg)["access"] == {"enforce": False, "registry_file": "/x/cams.json", "publish_registry": False}
+    with pytest.raises(ValueError, match="publish_registry needs camera_source: db"):
+        validate(deep_merge(DEFAULTS, {"access": {"publish_registry": True}}))
+    with pytest.raises(ValueError, match="publish_registry must be"):
+        validate(deep_merge(DEFAULTS, {"access": {"publish_registry": "yes"}}))
+    assert validate(deep_merge(DEFAULTS, {"camera_source": "db", "access": {"publish_registry": True}}))
+    with pytest.raises(ValueError, match="camera_source must be"):
+        validate(deep_merge(DEFAULTS, {"camera_source": "yaml"}))
     with pytest.raises(ValueError, match="registry_file"):
         validate(deep_merge(DEFAULTS, {"access": {"registry_file": ""}}))
     with pytest.raises(ValueError, match="enforce"):
@@ -139,7 +146,27 @@ def test_every_camera_route_is_covered(setup):
                    "/cams-record/api/push/event-context/{event_id}", "/cams-record/api/internal/detection-event"}
     covered = {"/cams-record" + u.split("?")[0].replace("{c}", "{cam}").replace("seg/1.ts", "seg/{segment_id}.ts")
                for u in CAMERA_ROUTES}
-    assert found == covered | camera_free
+    assert found == covered | camera_free | set(ADMIN_ONLY)
+
+
+# Camera management (Cameras app -> Admin tab) manages every camera, so it is admin-role only rather
+# than per camera: each method must refuse a non-admin before reading anything.
+ADMIN_ONLY = {
+    "/cams-record/api/admin/cameras": ("GET", "POST"),
+    "/cams-record/api/admin/cameras/{cam_id}": ("GET", "PUT", "DELETE"),
+    "/cams-record/api/admin/streams": ("GET",),
+}
+
+
+@pytest.mark.parametrize("roles", [["cams"], ["cams", "family"]])
+def test_admin_routes_refuse_non_admins(setup, roles):
+    db, _, client = setup
+    for path, methods in ADMIN_ONLY.items():
+        url = path.replace("/cams-record", "").replace("{cam_id}", "open") + "?expect_revision=0"
+        for method in methods:
+            r = client.request(method, url, headers=headers("ann", roles), json={"camera": {}, "expect_revision": 0})
+            assert r.status_code == 403, (method, path, r.status_code)
+    assert not touched(db)
 
 
 @pytest.mark.parametrize("path", ["clip", "clip/info"])

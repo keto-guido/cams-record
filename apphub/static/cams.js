@@ -234,6 +234,29 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !lb.hidden) lbClose(); });
 
   // ---------- detections list (shared by the tab and the camera page) ----------
+  // Detection type icon (24x24 line art in the accent colour); anything else gets a target.
+  const KIND = {
+    person: [['circle', { cx: 12, cy: 7, r: 3.2 }], ['path', { d: 'M5.5 20.5v-1.5a6.5 6.5 0 0 1 13 0v1.5' }]],
+    car: [['path', { d: 'M3 16.5v-4l2-5.5h14l2 5.5v4z' }], ['path', { d: 'M3 12.5h18' }],
+      ['circle', { cx: 7.5, cy: 17.5, r: 1.8 }], ['circle', { cx: 16.5, cy: 17.5, r: 1.8 }]],
+    dog: [['path', { d: 'M8 8.5a4 4 0 0 1 8 0v5.5a4 4 0 0 1-8 0z' }],
+      ['path', { d: 'M8.2 7.2C5.6 5.9 3.2 7 3.4 10.6c.1 2.3 1.2 4 2.6 3.7 1-.2 1.6-1.2 2-2.4' }],
+      ['path', { d: 'M15.8 7.2c2.6-1.3 5-.2 4.8 3.4-.1 2.3-1.2 4-2.6 3.7-1-.2-1.6-1.2-2-2.4' }],
+      ['circle', { cx: 10.4, cy: 10.6, r: 0.7, fill: 'currentColor' }], ['circle', { cx: 13.6, cy: 10.6, r: 0.7, fill: 'currentColor' }],
+      ['path', { d: 'M10.8 13.6h2.4L12 15z', fill: 'currentColor' }]],
+    cat: [['path', { d: 'M5 4.5l3.5 3.5h7L19 4.5v9a7 7 0 0 1-14 0z' }],
+      ['circle', { cx: 9.5, cy: 12.5, r: 0.75, fill: 'currentColor' }], ['circle', { cx: 14.5, cy: 12.5, r: 0.75, fill: 'currentColor' }],
+      ['path', { d: 'M11 15.3h2l-1 1.2z', fill: 'currentColor' }], ['path', { d: 'M2.5 14.3l4 .7M2.5 17.5l4-.7M21.5 14.3l-4 .7M21.5 17.5l-4-.7' }]],
+    other: [['circle', { cx: 12, cy: 12, r: 8 }], ['circle', { cx: 12, cy: 12, r: 2, fill: 'currentColor' }]],
+  };
+  function kindIcon(label) {
+    const NS = 'http://www.w3.org/2000/svg', key = KIND[label] ? label : 'other', wrap = document.createElement('span');
+    wrap.className = 'cd-kind cd-kind-' + key; wrap.title = cap(label || 'detection'); wrap.setAttribute('aria-hidden', 'true');
+    const svg = document.createElementNS(NS, 'svg');
+    [['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '1.7'], ['stroke-linecap', 'round'], ['stroke-linejoin', 'round']].forEach(([k, v]) => svg.setAttribute(k, v));
+    KIND[key].forEach(([tag, attrs]) => { const n = document.createElementNS(NS, tag); Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v)); svg.appendChild(n); });
+    wrap.appendChild(svg); return wrap;
+  }
   function evRow(e) {
     const it = document.createElement('div'); it.className = 'cd-row';
     const name = e.camera_name || detName[e.camera] || e.camera, label = cap(e.label);
@@ -242,7 +265,10 @@
     if (e.has_snapshot) {
       const b = document.createElement('div'); b.className = 'cd-row-thumb';
       const im = document.createElement('img'); im.loading = 'lazy'; im.alt = label + ' at ' + name;
-      im.src = CD + '/api/events/' + encodeURIComponent(e.id) + '/snapshot.jpg';
+      // Zoomed in on what was detected; the full snapshot if cams-detect has no thumbnail route yet.
+      const evBase = CD + '/api/events/' + encodeURIComponent(e.id);
+      im.addEventListener('error', () => { if (!im.dataset.full) { im.dataset.full = '1'; im.src = evBase + '/snapshot.jpg'; } });
+      im.src = evBase + '/thumb.jpg';
       const pl = document.createElement('span'); pl.className = 'cd-play'; pl.textContent = '\u25b6';
       b.append(im, pl); it.appendChild(b);
     } else { const ph = document.createElement('div'); ph.className = 'cd-row-thumb cd-row-none'; ph.textContent = 'No snapshot'; it.appendChild(ph); }
@@ -251,7 +277,7 @@
     const c = document.createElement('span'); c.textContent = name;
     const z = document.createElement('span'); z.className = 'muted sm'; z.textContent = (e.zones && e.zones.length) ? 'Zones: ' + e.zones.join(', ') : 'No zone';
     const t = document.createElement('span'); t.className = 'muted sm'; t.textContent = fmt(e.start_ts);
-    m.append(l, c, z, t); it.appendChild(m); return it;
+    m.append(l, c, z, t); it.appendChild(m); it.appendChild(kindIcon(String(e.label || '').toLowerCase())); return it;
   }
   // A list bound to a container: newest page is polled; "Load more" pages back with ?before=.
   function EvList(box, more, getQuery) {
@@ -634,9 +660,238 @@
     }
   }
 
+  // ---------- camera management (Admin tab; admins only, enforced by cams-record) ----------
+  // Camera objects live in cams_config (docs/camera-model.md). Every write sends the revision the view
+  // was loaded at; a newer change elsewhere answers 409 and nothing is overwritten.
+  const ADM = CR + '/api/admin', PURPOSES = [
+    ['live', 'Live view'], ['live_hd', 'Live view (HD)'], ['detect', 'Detection'],
+    ['verify', 'Checking detections'], ['snapshot', 'Snapshots'],
+  ];
+  const STREAM_LABEL = { main: 'Main (high res)', sub: 'Sub (low res)', snap: 'Snapshot' }, STREAM_SHORT = { main: 'Main', sub: 'Sub', snap: 'Snapshot' };
+  const adm = { ok: false, revision: 0, editable: false, mode: 'file', cameras: [], current: null, streams: null };
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  async function admJson(url, opts) {
+    const r = await fetch(url, { credentials: 'same-origin', ...opts, headers: { 'Content-Type': 'application/json', ...(opts && opts.headers) } });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(body.detail || ('Request failed (' + r.status + ')')); e.status = r.status; throw e; }
+    return body;
+  }
+  const names = s => s.split(',').map(x => x.trim()).filter(Boolean);
+  const slug = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '');
+  function defaultUse(keys) {
+    const low = keys.includes('sub') ? 'sub' : (keys.includes('main') ? 'main' : null);
+    const high = keys.includes('main') ? 'main' : low, out = {};
+    if (low) { out.live = [low]; out.detect = [low]; out.snapshot = [keys.includes('snap') ? 'snap' : low]; }
+    if (high) { out.live_hd = [high]; out.verify = [high]; }
+    out.record = ['main', 'sub'].filter(k => keys.includes(k));
+    return out;
+  }
+  function visibilityText(c) {
+    if (c.visibility === 'everyone') return 'Everyone';
+    const who = [...c.users, ...c.roles.map(r => r + ' (role)')];
+    return who.length ? 'Only ' + who.join(', ') : 'Admins only';
+  }
+  async function admCheck() {
+    // The tab appears only for admins: everyone else gets 401/403 from cams-record.
+    try { await admLoad(); } catch (e) { if (e.status === 401 || e.status === 403 || !e.status) return; adm.ok = true; adm.error = e.message; }
+    $('tab-admin').hidden = !adm.ok;
+    if (adm.ok && /^admin(=|$)/.test(location.hash.replace(/^#/, ''))) show();  // a direct #admin link waited for this
+  }
+  async function admLoad() {
+    const b = await admJson(ADM + '/cameras');
+    Object.assign(adm, { ok: true, error: null, revision: b.revision, editable: b.editable, mode: b.mode,
+      cameras: b.cameras, source: b.camera_source });
+    return b;
+  }
+  async function admDetectReport() {
+    try { const s = await admJson(CD + '/api/status'); return (s.service && s.service.camera_source) || null; } catch (e) { return null; }
+  }
+  function admBanner(detect) {
+    const b = $('adm-banner'); b.textContent = ''; b.className = 'adm-banner';
+    const line = (t, cls) => b.appendChild(el('p', cls, t));
+    if (adm.error) { b.classList.add('err'); line('Camera settings could not be loaded: ' + adm.error); b.hidden = false; return; }
+    const src = adm.source || {};
+    if (adm.mode === 'file') {
+      line('Read-only. Recording and detection still use their configuration files (camera_source: file), so changes here would have no effect. Set camera_source to shadow to compare, or db to apply.');
+    } else if (adm.mode === 'shadow') {
+      line('Shadow mode: recording and detection still use their configuration files. Changes here are compared with them, not applied.');
+      const diffs = [...(src.differences || []).map(d => 'Recording: ' + d), ...((detect && detect.differences) || []).map(d => 'Detection: ' + d)];
+      if (!diffs.length) line(src.differences ? 'No differences: switching to the database would change nothing.' : 'Waiting for the first comparison…', 'muted sm');
+      else { line(diffs.length + (diffs.length === 1 ? ' difference:' : ' differences:'), 'adm-warn'); const ul = el('ul', 'adm-diffs'); diffs.forEach(d => ul.appendChild(el('li', null, d))); b.appendChild(ul); }
+    } else {
+      line('Live: changes apply to recording and detection within a few seconds.');
+      if (src.registry && src.registry.error) line('Access list not published: ' + src.registry.error, 'adm-warn');
+      if (detect && detect.fallback_to_files) line('Detection is running on its configuration file until the database is reachable.', 'adm-warn');
+      if (detect && detect.skipped && detect.skipped.length) line('Detection skipped: ' + detect.skipped.join('; '), 'adm-warn');
+    }
+    if (src.error) line('Database: ' + src.error, 'adm-warn');
+    b.hidden = false;
+  }
+  async function admShowList() {
+    $('adm-list').textContent = ''; $('adm-list').appendChild(el('p', 'muted sm', 'Loading…'));
+    let detect = null;
+    try { [, detect] = await Promise.all([admLoad(), admDetectReport()]); } catch (e) { adm.error = e.message; }
+    if (route.view !== 'admin') return;
+    admBanner(detect);
+    $('adm-add').hidden = !adm.editable || !!adm.error;
+    const list = $('adm-list'); list.textContent = '';
+    if (adm.error) return;
+    if (!adm.cameras.length) { list.appendChild(el('p', 'muted', 'No cameras in the camera settings database yet.')); return; }
+    adm.cameras.forEach(c => {
+      const row = el('a', 'adm-row'); row.href = '#admin=' + encodeURIComponent(c.id);
+      const main = el('div', 'adm-row-main');
+      main.appendChild(el('strong', null, c.name)); main.appendChild(el('span', 'muted sm', c.id));
+      row.appendChild(main);
+      const chips = el('div', 'adm-chips');
+      chips.appendChild(el('span', 'adm-chip' + (c.enabled ? ' on' : ''), c.enabled ? 'On' : 'Off'));
+      chips.appendChild(el('span', 'adm-chip', visibilityText(c)));
+      const rec = c.use.record || [];
+      chips.appendChild(el('span', 'adm-chip', rec.length ? 'Records ' + rec.join(' + ') : 'Not recorded'));
+      const det = c.detection;
+      chips.appendChild(el('span', 'adm-chip', !det || !(c.use.detect || []).length ? 'No detection' : det.enabled === false ? 'Detection off' : 'Detection on'));
+      Object.entries(c.recording_state || {}).forEach(([q, st]) => { if (st && st !== 'recording') chips.appendChild(el('span', 'adm-chip warn', q + ': ' + st)); });
+      row.appendChild(chips);
+      list.appendChild(row);
+    });
+  }
+  // ---- editor ----
+  const F = id => $('f-' + id);
+  function streamKeys() { return ['main', 'sub', 'snap'].filter(k => F(k).value.trim()); }
+  function renderUse(use) {
+    const box = F('use'), keys = streamKeys(); box.textContent = '';
+    PURPOSES.forEach(([p, label]) => {
+      const l = el('label', 'adm-field'); l.appendChild(document.createTextNode(label));
+      const s = el('select'); s.id = 'f-use-' + p; s.appendChild(new Option('Off', ''));
+      keys.forEach(k => s.appendChild(new Option(STREAM_SHORT[k] + ' · ' + F(k).value.trim(), k)));
+      s.value = (use[p] || [])[0] && keys.includes(use[p][0]) ? use[p][0] : '';
+      l.appendChild(s); box.appendChild(l);
+    });
+    const rec = el('div', 'adm-field'); rec.appendChild(document.createTextNode('Recording'));
+    ['main', 'sub'].forEach(k => {
+      const c = el('label', 'adm-check'), i = el('input'); i.type = 'checkbox'; i.id = 'f-rec-' + k;
+      i.checked = (use.record || []).includes(k) && keys.includes(k); i.disabled = !keys.includes(k) || !adm.editable;
+      c.appendChild(i); c.appendChild(document.createTextNode(STREAM_LABEL[k])); rec.appendChild(c);
+    });
+    box.appendChild(rec);
+    box.querySelectorAll('select').forEach(s => { s.disabled = !adm.editable; });
+  }
+  function readUse() {
+    const out = {};
+    PURPOSES.forEach(([p]) => { const v = $('f-use-' + p).value; if (v) out[p] = [v]; });
+    const rec = ['main', 'sub'].filter(k => $('f-rec-' + k).checked && !$('f-rec-' + k).disabled);
+    if (rec.length) out.record = rec;
+    return out;
+  }
+  function whoToggle() { $('f-who').hidden = !$('f-vis-restricted').checked; }
+  function admMsg(text, cls) { const m = $('adm-msg'); m.textContent = text || ''; m.className = 'adm-msg' + (cls ? ' ' + cls : ''); }
+  async function admLoadStreams() {
+    if (adm.streams) return;
+    try {
+      const b = await admJson(ADM + '/streams'); adm.streams = b;
+      const dl = F('go2rtc'); dl.textContent = '';
+      b.streams.forEach(s => { const o = new Option(s.used_by.length ? s.name + ' (used by ' + s.used_by.join(', ') + ')' : s.name); o.value = s.name; dl.appendChild(o); });
+      F('go2rtc-msg').textContent = b.reachable ? '' : 'go2rtc did not answer, so its stream names cannot be suggested; type them.';
+    } catch (e) { F('go2rtc-msg').textContent = 'Stream names could not be loaded: ' + e.message; }
+  }
+  async function admShowEdit(id) {
+    admMsg(''); $('adm-history').textContent = ''; $('adm-form').hidden = true;
+    $('adm-title').textContent = id ? 'Loading…' : 'Add camera';
+    let cam, history = [];
+    try {
+      if (id) { const b = await admJson(ADM + '/cameras/' + encodeURIComponent(id)); Object.assign(adm, { revision: b.revision, editable: b.editable, mode: b.mode }); cam = b.camera; history = b.history; }
+      else { await admLoad(); cam = { id: '', name: '', enabled: true, visibility: 'restricted', users: [], roles: [], streams: {}, use: {}, detection: { enabled: true }, recording: null }; }
+    } catch (e) { $('adm-title').textContent = id || 'Add camera'; admMsg(e.status === 404 ? 'This camera no longer exists.' : e.message, 'err'); return; }
+    if (route.view !== 'admin-edit' || (route.id || null) !== (id || null)) return;
+    adm.current = cam;
+    $('adm-title').textContent = id ? cam.name : 'Add camera';
+    F('id').value = cam.id; F('id').readOnly = !!id; F('id-row').hidden = !!id; $('f-id-help').hidden = !!id;
+    F('name').value = cam.name; F('enabled').checked = cam.enabled;
+    ['main', 'sub', 'snap'].forEach(k => { F(k).value = (cam.streams[k] && cam.streams[k].go2rtc_name) || ''; });
+    renderUse(id ? cam.use : defaultUse(streamKeys()));
+    $('f-vis-' + (cam.visibility === 'everyone' ? 'everyone' : 'restricted')).checked = true; whoToggle();
+    F('users').value = cam.users.join(', '); F('roles').value = cam.roles.join(', ');
+    F('detect').checked = !!cam.detection && cam.detection.enabled !== false;
+    F('masks').href = '/cams-detect/masks?camera=' + encodeURIComponent(cam.id); F('masks-row').hidden = !id || !cam.detection;
+    F('main-days').value = (cam.recording && cam.recording.main_days) || ''; F('sub-days').value = (cam.recording && cam.recording.sub_days) || '';
+    $('adm-form').querySelectorAll('input').forEach(i => { if (i.id !== 'f-id' || !id) i.disabled = !adm.editable; });
+    $('adm-save').hidden = !adm.editable; $('adm-delete').hidden = !adm.editable || !id; $('f-defaults').hidden = !adm.editable;
+    if (!adm.editable) admMsg('Read-only while camera_source is file.');
+    $('adm-form').hidden = false;
+    $('adm-history-title').hidden = !history.length;
+    history.forEach(h => {
+      const li = el('li'), before = h.before || {}, after = h.after || {};
+      const changed = Object.keys({ ...before, ...after }).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+      li.appendChild(el('strong', null, new Date(h.at).toLocaleString()));
+      li.appendChild(document.createTextNode(' · ' + h.actor + ' · ' + h.action + (changed.length && h.action === 'update' ? ': ' + changed.join(', ') : '')));
+      $('adm-history').appendChild(li);
+    });
+    admLoadStreams();
+  }
+  function admForm() {
+    const streams = {};
+    ['main', 'sub', 'snap'].forEach(k => { const v = F(k).value.trim(); if (v) streams[k] = { go2rtc_name: v }; });
+    const days = v => v.trim() === '' ? null : Number(v);
+    const restricted = $('f-vis-restricted').checked;
+    const out = { name: F('name').value.trim(), enabled: F('enabled').checked, visibility: restricted ? 'restricted' : 'everyone',
+      users: restricted ? names(F('users').value) : [], roles: restricted ? names(F('roles').value) : [],
+      streams, use: readUse(), recording: { main_days: days(F('main-days').value), sub_days: days(F('sub-days').value) },
+      detection_enabled: F('detect').checked };
+    if (!route.id) out.id = F('id').value.trim();
+    return out;
+  }
+  async function admSave(ev) {
+    ev.preventDefault();
+    if (!adm.editable) return;
+    const form = admForm();
+    if (!form.name) return admMsg('Give the camera a name.', 'err');
+    if (!route.id && !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(form.id)) return admMsg('The ID may use lowercase letters, numbers and dashes, and must start and end with a letter or number.', 'err');
+    if (!Object.keys(form.streams).length) return admMsg('Add at least one stream.', 'err');
+    $('adm-save').disabled = true; admMsg('Saving…');
+    try {
+      const body = JSON.stringify({ camera: form, expect_revision: adm.revision });
+      if (route.id) await admJson(ADM + '/cameras/' + encodeURIComponent(route.id), { method: 'PUT', body });
+      else await admJson(ADM + '/cameras', { method: 'POST', body });
+      sessionStorage.setItem('cams-adm-flash', (route.id ? 'Saved ' : 'Added ') + form.name + (adm.mode === 'db' ? '. It applies within a few seconds.' : '.'));
+      location.hash = 'admin';
+    } catch (e) {
+      admMsg(e.status === 409 && /revision/.test(e.message) ? 'Someone else changed the cameras since this page loaded. Reload to see their change, then make yours again.' : e.message, 'err');
+    } finally { $('adm-save').disabled = false; }
+  }
+  async function admDelete() {
+    const cam = adm.current;
+    if (!cam || !route.id || !window.confirm('Delete ' + cam.name + '? Recording and detection stop for it. Existing recordings are kept until retention removes them.')) return;
+    try {
+      await admJson(ADM + '/cameras/' + encodeURIComponent(cam.id) + '?expect_revision=' + adm.revision, { method: 'DELETE' });
+      sessionStorage.setItem('cams-adm-flash', 'Deleted ' + cam.name + '.'); location.hash = 'admin';
+    } catch (e) { admMsg(e.message, 'err'); }
+  }
+  $('adm-form').addEventListener('submit', admSave);
+  $('adm-delete').addEventListener('click', admDelete);
+  $('adm-cancel').addEventListener('click', () => { location.hash = 'admin'; });
+  $('adm-back').addEventListener('click', () => { location.hash = 'admin'; });
+  $('adm-add').addEventListener('click', () => { location.hash = 'admin=new'; });
+  $('f-defaults').addEventListener('click', () => renderUse(defaultUse(streamKeys())));
+  ['main', 'sub', 'snap'].forEach(k => F(k).addEventListener('change', () => renderUse(route.id ? readUse() : defaultUse(streamKeys()))));
+  F('name').addEventListener('input', () => { if (!route.id && !F('id').dataset.touched) F('id').value = slug(F('name').value); });
+  F('id').addEventListener('input', () => { F('id').dataset.touched = '1'; });
+  $('f-vis-everyone').addEventListener('change', whoToggle); $('f-vis-restricted').addEventListener('change', whoToggle);
+  function admShow() {
+    if (route.view === 'admin') {
+      const flash = sessionStorage.getItem('cams-adm-flash'); sessionStorage.removeItem('cams-adm-flash');
+      admShowList().then(() => { if (flash && route.view === 'admin') { const b = $('adm-banner'); b.insertBefore(el('p', 'adm-ok', flash), b.firstChild); b.hidden = false; } });
+      document.title = 'Camera management · Cameras · MERSINO NETWORK';
+    } else if (route.view === 'admin-edit') {
+      F('id').dataset.touched = ''; admShowEdit(route.id);
+      document.title = (route.id ? 'Edit camera' : 'Add camera') + ' · Cameras · MERSINO NETWORK';
+    }
+  }
+
   // ---------- routing ----------
   function parse() {
     const h = location.hash.replace(/^#/, '');
+    if (h === 'admin') return { view: 'admin' };
+    const am = h.match(/^admin=(new|[a-z0-9][a-z0-9-]{0,63})$/);
+    if (am) return { view: 'admin-edit', id: am[1] === 'new' ? null : am[1] };
     const ev = h.match(/^event=([^&]+)$/);
     if (ev) return { view: 'event', eventId: ev[1] };
     if (h === 'detections') return { view: 'det' };
@@ -652,9 +907,13 @@
       route = { view: 'grid' };
     }
     if (prev.view === 'cam' && (route.view !== 'cam' || route.id !== prev.id)) { liveStop(); timelineStop(); }
+    if ((route.view === 'admin' || route.view === 'admin-edit') && !adm.ok) route = { view: 'grid' };  // not (yet) known to be an admin
     $('view-grid').hidden = route.view !== 'grid'; $('view-det').hidden = route.view !== 'det'; $('view-cam').hidden = route.view !== 'cam';
-    $('cams-tabs').hidden = route.view === 'cam';
-    document.querySelectorAll('.cams-tab').forEach(a => a.setAttribute('aria-current', a.dataset.view === route.view ? 'page' : 'false'));
+    $('view-admin').hidden = route.view !== 'admin'; $('view-admin-edit').hidden = route.view !== 'admin-edit';
+    $('cams-tabs').hidden = route.view === 'cam' || route.view === 'admin-edit';
+    const tabView = route.view === 'admin-edit' ? 'admin' : route.view;
+    document.querySelectorAll('.cams-tab').forEach(a => a.setAttribute('aria-current', a.dataset.view === tabView ? 'page' : 'false'));
+    admShow();
     evStop();
     if (route.view !== 'cam') sessionStorage.removeItem('cams-in-app');
     if (route.view === 'grid') { if (visible()) gridStart(); } else gridStop();
@@ -671,7 +930,7 @@
         if (!camDet) { $('cam-off').hidden = false; $('cam-list').innerHTML = ''; return; }
         camList.reset(); evStart(camList);
       });
-    } else document.title = 'Cameras · MERSINO NETWORK';
+    } else if (route.view !== 'admin' && route.view !== 'admin-edit') document.title = 'Cameras · MERSINO NETWORK';
   }
   tiles.forEach(t => t.addEventListener('click', () => { sessionStorage.setItem('cams-in-app', '1'); location.hash = 'cam=' + t.dataset.id; }));
   document.querySelectorAll('.cams-tab').forEach(a => a.addEventListener('click', () => sessionStorage.setItem('cams-in-app', '1')));
@@ -682,4 +941,5 @@
     else { cdStop(); gridStop(); }
   });
   show();
+  admCheck();
 })();

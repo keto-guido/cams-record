@@ -14,11 +14,15 @@ services:
       HTTP_PORT: "8097"
       BASE_PATH: /cams-record
       RECORD_ROOT: /volume1/nvr
+      # Last good cams_config camera objects, kept across container re-creation (docs/camera-model.md).
+      CAMS_CONFIG_CACHE_FILE: /data/cams_config.json
+      # CAMERA_SOURCE: shadow     # file (default) | shadow | db
       # DB_HOST: 127.0.0.1
       # DB_PORT: "3306"
     volumes:
       - /volume1/nvr:/volume1/nvr
       - ./config:/config:ro
+      - ./data:/data
       # The directory, not cams.json itself: the hub saves by atomic rename, which a file mount would miss.
       - ${APPHUB_CAMERA_REGISTRY_DIR:?set APPHUB_CAMERA_REGISTRY_DIR to a dedicated directory containing only cams.json}:/apphub-data:ro
     secrets:

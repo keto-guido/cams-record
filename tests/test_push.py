@@ -5,6 +5,7 @@ real cams_detect.events schema, and VAPID PEM → pywebpush key loading.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 from pathlib import Path
@@ -92,6 +93,13 @@ CREATE TABLE IF NOT EXISTS cams_detect.events (
 """
 
 
+# front-door is open to every cams user; garage only to eric and the family role.
+REGISTRY = [
+    {"id": "front-door", "name": "Front Door"},
+    {"id": "garage", "name": "Garage", "users": ["eric"], "roles": ["family"]},
+]
+
+
 @pytest.fixture
 def push_env(tmp_path):
     pem, pub, path = _vapid_pem(tmp_path)
@@ -99,8 +107,12 @@ def push_env(tmp_path):
     jwt_file.write_text(SECRET + "\n")
     hook_file = tmp_path / "push_webhook_secret"
     hook_file.write_text(WEBHOOK)
+    registry_dir = tmp_path / "apphub-registry"
+    registry_dir.mkdir()
+    (registry_dir / "cams.json").write_text(json.dumps(REGISTRY))
     cfg = deep_merge(DEFAULTS, {
         "auth": {"secret_file": str(jwt_file)},
+        "access": {"registry_file": str(registry_dir / "cams.json")},
         "recording": {"root": str(tmp_path / "nvr"), "state_dir": str(tmp_path / "state")},
         "push": {
             "enabled": True,
@@ -111,7 +123,8 @@ def push_env(tmp_path):
             "poll_enabled": False,
         },
     })
-    cams = {"front-door": resolve_camera("front-door", {"main_stream": "front-door", "sub_stream": "fd-sub"})}
+    cams = {"front-door": resolve_camera("front-door", {"main_stream": "front-door", "sub_stream": "fd-sub"}),
+            "garage": resolve_camera("garage", {"main_stream": "garage-main", "sub_stream": "garage"})}
     return cfg, cams, pub, path, pem
 
 
@@ -471,3 +484,119 @@ def test_migration_v6_widens_existing_push_sent_events(db):
     stored = db.run(lambda cur: (cur.execute("SELECT event_id FROM push_sent_events"),
                                  cur.fetchone()[0])[1])
     assert stored == PROD_EVENT_ID
+
+
+# ---- detection pushes follow per-camera access (docs/camera-access.md) ----
+
+def _subscribe(db, user, roles, name):
+    sub = validate_subscription(_sub_body(f"https://fcm.googleapis.com/fcm/send/{name}"))
+    db.upsert_push_subscription(user, sub, roles=roles)
+    return sub
+
+
+def _capture(monkeypatch, push):
+    sent = []
+
+    def capture(subscription, payload):
+        sent.append(subscription["user_sub"])
+        return True, 201
+
+    monkeypatch.setattr(push, "send_raw", capture)
+    return sent
+
+
+def _event(camera_id, eid="1793897909-aaaaaa"):
+    return DetectionEvent(id=eid, camera_id=camera_id, label="person", score=0.9,
+                          start_ts=1_700_000_000.0, end_ts=None, camera_name=camera_id)
+
+
+def test_push_only_reaches_viewers_of_restricted_camera(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    svc = Service(cfg, cams, db=db)
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "eric", ["cams"], "eric")          # named in users
+    _subscribe(db, "bob", ["cams"], "bob")            # not granted
+    _subscribe(db, "carol", ["cams", "family"], "carol")  # granted by role
+    _subscribe(db, "root", ["admin"], "root")         # admin sees every registered camera
+    _subscribe(db, "dave", None, "dave")              # pre-v7 row: roles unknown
+
+    r = svc.push.notify_event(_event("garage"))
+    assert sorted(sent) == ["carol", "eric", "root"]
+    assert r["sent"] == 3 and r["filtered"] == 2 and r["subscribers"] == 5
+
+    sent.clear()
+    svc.push.notify_event(_event("front-door", eid="1793897909-bbbbbb"))
+    assert sorted(sent) == ["bob", "carol", "dave", "eric", "root"]
+
+
+def test_push_unregistered_camera_notifies_nobody(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    svc = Service(cfg, cams, db=db)
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "root", ["admin"], "root")
+    r = svc.push.notify_event(_event("shed"))
+    assert sent == [] and r["filtered"] == 1
+
+
+def test_push_unreadable_registry_notifies_nobody(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    Path(cfg["access"]["registry_file"]).write_text("not json")
+    svc = Service(cfg, cams, db=db)
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "root", ["admin"], "root")
+    svc.push.notify_event(_event("front-door"))
+    assert sent == []
+
+
+def test_push_stale_roles_fall_back_to_no_roles(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    cfg["push"]["roles_max_age_days"] = 1
+    svc = Service(cfg, cams, db=db)
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "carol", ["family"], "carol")
+    db.run(lambda cur: cur.execute(
+        "UPDATE push_subscriptions SET roles_at = UTC_TIMESTAMP(3) - INTERVAL 2 DAY"))
+    svc.push.notify_event(_event("garage"))
+    assert sent == []
+
+
+def test_push_status_refreshes_roles_used_for_alerts(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    svc = Service(cfg, cams, db=db)
+    client = TestClient(create_app(svc, cfg))
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "carol", None, "carol")
+    svc.push.notify_event(_event("garage"))
+    assert sent == []
+
+    assert client.get("/cams-record/api/push/status",
+                      headers={"x-apphub-token": tok(sub="carol", roles=["cams", "family"])}).status_code == 200
+    svc.push.notify_event(_event("garage", eid="1793897909-cccccc"))
+    assert sent == ["carol"]
+
+    # Losing the role takes effect on the next app open.
+    client.get("/cams-record/api/push/status", headers={"x-apphub-token": tok(sub="carol", roles=["cams"])})
+    sent.clear()
+    svc.push.notify_event(_event("garage", eid="1793897909-dddddd"))
+    assert sent == []
+
+
+def test_subscribe_stores_roles(db, push_env):
+    cfg, cams, *_ = push_env
+    svc = Service(cfg, cams, db=db)
+    client = TestClient(create_app(svc, cfg))
+    client.post("/cams-record/api/push/subscribe", json=_sub_body(),
+                headers={"x-apphub-token": tok(sub="carol", roles=["family", "cams"])})
+    (row,) = db.list_push_subscriptions()
+    assert json.loads(row["roles_json"]) == ["cams", "family"]
+    assert row["roles_at"] is not None
+
+
+def test_push_access_not_enforced_sends_to_everyone(db, push_env, monkeypatch):
+    cfg, cams, *_ = push_env
+    cfg["access"]["enforce"] = False
+    svc = Service(cfg, cams, db=db)
+    sent = _capture(monkeypatch, svc.push)
+    _subscribe(db, "bob", ["cams"], "bob")
+    svc.push.notify_event(_event("shed"))
+    assert sent == ["bob"]

@@ -130,3 +130,52 @@ button.tl-cancel{position:absolute;right:0;top:0}
 }
 
 button.camtile:focus-visible{outline:2px solid var(--mn-accent);outline-offset:3px}button.tl-det[aria-disabled=true]{opacity:1}
+
+/* ---------- camera management (Admin tab) ---------- */
+.adm-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--mn-space-3);margin:var(--mn-space-3) 0}
+.adm-head h1{margin:0;font-size:var(--mn-text-xl)}
+button.adm-btn,button.adm-btn:hover{min-height:var(--mn-tap);padding:0 var(--mn-space-4);border:1px solid var(--mn-border);border-radius:var(--mn-radius-sm);background:transparent;color:inherit;font:inherit;cursor:pointer}
+button.adm-btn:hover,button.adm-btn:focus-visible{border-color:var(--mn-accent);background:var(--mn-hover)}
+button.adm-btn.primary,button.adm-btn.primary:hover{background:var(--mn-accent);border-color:var(--mn-accent);color:var(--mn-on-accent);font-weight:600}
+button.adm-btn.danger,button.adm-btn.danger:hover{color:var(--mn-danger);border-color:var(--mn-danger)}
+button.adm-btn[hidden]{display:none}
+button.adm-btn:disabled{opacity:.6;cursor:default}
+.adm-banner{margin:0 0 var(--mn-space-3);padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md)}
+.adm-banner[hidden]{display:none}
+.adm-banner p{margin:0 0 var(--mn-space-1)}
+.adm-banner p:last-child{margin-bottom:0}
+.adm-banner.err,.adm-warn{color:var(--mn-danger)}
+.adm-ok{color:var(--mn-accent);font-weight:600}
+.adm-diffs{margin:var(--mn-space-1) 0 0;padding-left:1.2em;font-size:var(--mn-text-sm);overflow-wrap:anywhere}
+.adm-list{display:flex;flex-direction:column;gap:var(--mn-space-2)}
+a.adm-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--mn-space-2);padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md);color:inherit;text-decoration:none}
+a.adm-row:hover,a.adm-row:focus-visible{border-color:var(--mn-accent);outline:none}
+.adm-row-main{display:flex;flex-direction:column;min-width:0}
+.adm-row-main strong{overflow-wrap:anywhere}
+.adm-chips{display:flex;flex-wrap:wrap;gap:var(--mn-space-1)}
+.adm-chip{padding:0 var(--mn-space-2);border:1px solid var(--mn-border);border-radius:var(--mn-radius-pill);font-size:var(--mn-text-sm);line-height:1.8;color:var(--mn-text-muted);white-space:nowrap}
+.adm-chip.on{border-color:var(--mn-accent);color:inherit}
+.adm-chip.warn{border-color:var(--mn-warn);color:inherit}
+.adm-form[hidden]{display:none}
+.adm-form fieldset{margin:0 0 var(--mn-space-3);padding:var(--mn-space-3);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md);min-width:0}
+.adm-form legend{padding:0 var(--mn-space-1);font-weight:650}
+.adm-field{display:flex;flex-direction:column;gap:2px;margin:0 0 var(--mn-space-2);font-size:var(--mn-text-sm);color:var(--mn-text-muted)}
+.adm-field[hidden],#f-who[hidden],.adm-form p[hidden]{display:none}
+.adm-field input,.adm-field select{min-height:var(--mn-tap);padding:0 var(--mn-space-2);border:1px solid var(--mn-border);border-radius:var(--mn-radius-sm);background:var(--mn-surface-2,transparent);color:var(--mn-text);font:inherit;font-size:16px;max-width:100%}
+.adm-field input:focus-visible,.adm-field select:focus-visible{outline:2px solid var(--mn-accent);outline-offset:1px}
+.adm-field input:read-only{opacity:.7}
+.adm-check{display:flex;align-items:center;gap:var(--mn-space-2);min-height:var(--mn-tap);color:var(--mn-text);font-size:inherit}
+.adm-check input{width:20px;height:20px;margin:0;accent-color:var(--mn-accent)}
+.adm-use{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr));gap:0 var(--mn-space-3)}
+.adm-msg{min-height:1.4em;margin:0 0 var(--mn-space-2)}
+.adm-msg.err{color:var(--mn-danger)}
+.adm-actions{display:flex;flex-wrap:wrap;gap:var(--mn-space-2);margin-bottom:var(--mn-space-4)}
+.adm-actions .danger{margin-left:auto}
+.adm-history{margin:0;padding:0;list-style:none;font-size:var(--mn-text-sm);color:var(--mn-text-muted)}
+.adm-history li{margin-bottom:var(--mn-space-1);overflow-wrap:anywhere}
+.adm-history strong{color:var(--mn-text);font-weight:600}
+
+/* ---------- detection type icon (right side of each detection row) ---------- */
+.cd-kind{flex:none;display:flex;align-items:center;justify-content:center;width:52px;height:52px;margin-left:auto;border-radius:50%;background:var(--mn-accent-soft);color:var(--mn-accent)}
+.cd-kind svg{width:30px;height:30px}
+@media (max-width:480px){.cd-kind{width:44px;height:44px}.cd-kind svg{width:26px;height:26px}}

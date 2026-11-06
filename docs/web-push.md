@@ -12,7 +12,7 @@ and must never be committed.**
 |---|---|---|
 | PWA UI + SW | `apphub/` | Manifest, `/cams/sw.js`, subscribe/unsubscribe control, `#event=<id>` deep link |
 | API + storage | `cams_record/` | VAPID, subscription CRUD, test send (own subs only), event context, webhook, poller |
-| Schema | migrations **v5** + **v6** | `push_subscriptions`; `push_sent_events` (dedupe; `event_id` is `VARCHAR(64)` after v6) |
+| Schema | migrations **v5**, **v6**, **v7** | `push_subscriptions` (v7 adds `roles_json`, `roles_at`); `push_sent_events` (dedupe; `event_id` is `VARCHAR(64)` after v6) |
 
 There is **no public send endpoint**. User routes require the App Hub
 `x-apphub-token` with role `admin` or `cams`. The detection webhook requires
@@ -81,6 +81,25 @@ Push bodies include title/body/url/tag/camera/label/start_ts/`event_id` only —
 **no snapshot bytes or image URLs.** Clicks open `/cams/#event=<id>`.
 
 Dead push endpoints (HTTP 404/410 from the push service) are deleted automatically.
+
+## Who receives an alert
+
+A detection alert goes only to subscribers who may view that camera, decided by the same registry
+rule as everything else (`docs/camera-access.md`): the camera id must be in `cams.json` and its
+`users` / `roles` (or the `admin` role) must allow the subscriber.
+
+- **Roles** come from the subscriber's last verified App Hub JWT. They are saved when the device
+  subscribes and refreshed every time the app opens (`GET /api/push/status`), so granting or
+  removing a role applies from that user's next app open.
+- Rows created before migration v7, and roles older than `push.roles_max_age_days` (default 30),
+  count as **no roles**: the user still gets alerts for open cameras and cameras that list them
+  in `users`, but not role-only grants. Admins get alerts for restricted cameras again as soon as
+  they open the app. This can only under-notify, never over-notify.
+- A camera that is **not in the registry**, or a missing/unreadable registry, notifies **nobody**,
+  admins included. The first such event per camera logs
+  `push: camera <id> is not in the camera registry; nobody is notified for it`.
+- `access.enforce: false` (development only) sends every alert to every subscriber, as before.
+- `POST /api/push/test` is not filtered: it only reaches the caller's own devices.
 
 ## Detection integration
 
@@ -151,6 +170,7 @@ if you can avoid it (it already binds to `127.0.0.1`).
 | `push.poll_enabled` | `true` | Poll `cams_detect.events` |
 | `push.interval_s` / `lookback_s` | `15` / `120` | Poller timing |
 | `push.labels` | `[]` | Empty = all labels |
+| `push.roles_max_age_days` | `30` | Saved subscriber roles older than this are ignored (see *Who receives an alert*) |
 
 Environment overrides: `PUSH_ENABLED`, `PUSH_VAPID_PRIVATE_FILE`,
 `PUSH_VAPID_PUBLIC_KEY`, `PUSH_VAPID_SUBJECT`, `PUSH_WEBHOOK_SECRET_FILE`,

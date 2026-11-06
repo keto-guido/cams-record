@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections.abc import Iterable
@@ -103,18 +104,36 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         """ALTER TABLE push_sent_events
             MODIFY COLUMN event_id VARCHAR(64) NOT NULL""",
     ]),
+    # Roles from the subscriber's last verified JWT, so detection pushes honour per-camera access.
+    # NULL (rows from before v7) means "no roles known": only open cameras and explicit user grants.
+    (7, [
+        """ALTER TABLE push_subscriptions
+            ADD COLUMN IF NOT EXISTS roles_json VARCHAR(2048) NULL,
+            ADD COLUMN IF NOT EXISTS roles_at DATETIME(3) NULL""",
+    ]),
 ]
+
+_PUSH_COLUMNS = ("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent", "roles_json", "roles_at")
+_PUSH_SELECT = ", ".join(_PUSH_COLUMNS)
+
+
+def _push_row(r) -> dict:
+    row = dict(zip(_PUSH_COLUMNS, r, strict=True))
+    row["roles_at"] = from_dt(row["roles_at"])
+    return row
+
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions",
           "push_sent_events", "schema_version")
 
 
 class Database:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, migrations: list[tuple[int, list[str]]] | None = None):
         import pymysql
 
         self.pymysql = pymysql
         self.cfg = cfg
+        self.migrations = MIGRATIONS if migrations is None else migrations
         self.password = cfg.get("password")
         if self.password is None:
             self.password = read_secret(cfg.get("password_file")) or ""
@@ -172,7 +191,7 @@ class Database:
                         "applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)) ENGINE=InnoDB")
             cur.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version")
             current = int(cur.fetchone()[0])
-            for version, stmts in MIGRATIONS:
+            for version, stmts in self.migrations:
                 if version <= current:
                     continue
                 for stmt in stmts:
@@ -358,16 +377,24 @@ class Database:
                     "end_ts": from_dt(r[5]) if r[5] is not None else None}
         return self.run(q)
 
-    def upsert_push_subscription(self, user_sub: str, sub: dict) -> None:
+    def upsert_push_subscription(self, user_sub: str, sub: dict, roles=None) -> None:
+        roles_json = json.dumps(sorted(set(roles))) if roles is not None else None
         self.run(lambda cur: cur.execute(
             """INSERT INTO push_subscriptions
-               (user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent)
-               VALUES (%s, %s, %s, %s, %s, %s)
+               (user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent, roles_json, roles_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, IF(%s IS NULL, NULL, UTC_TIMESTAMP(3)))
                ON DUPLICATE KEY UPDATE user_sub=VALUES(user_sub), endpoint=VALUES(endpoint),
                  p256dh=VALUES(p256dh), auth=VALUES(auth),
-                 user_agent=COALESCE(VALUES(user_agent), user_agent)""",
+                 user_agent=COALESCE(VALUES(user_agent), user_agent),
+                 roles_json=VALUES(roles_json), roles_at=VALUES(roles_at)""",
             (user_sub, sub["endpoint"], sub["endpoint_hash"], sub["p256dh"], sub["auth"],
-             sub.get("user_agent"))))
+             sub.get("user_agent"), roles_json, roles_json)))
+
+    def refresh_push_roles(self, user_sub: str, roles) -> int:
+        """Store the roles from a freshly verified JWT on every subscription of this user."""
+        return self.run(lambda cur: cur.execute(
+            "UPDATE push_subscriptions SET roles_json=%s, roles_at=UTC_TIMESTAMP(3) WHERE user_sub=%s",
+            (json.dumps(sorted(set(roles))), user_sub)))
 
     def delete_push_subscription(self, user_sub: str, endpoint_hash: str) -> int:
         return self.run(lambda cur: cur.execute(
@@ -385,18 +412,14 @@ class Database:
 
     def push_subscriptions_for_user(self, user_sub: str) -> list[dict]:
         def q(cur):
-            cur.execute("""SELECT user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent
-                           FROM push_subscriptions WHERE user_sub=%s""", (user_sub,))
-            return [dict(zip(("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent"),
-                             r, strict=True)) for r in cur.fetchall()]
+            cur.execute(f"""SELECT {_PUSH_SELECT} FROM push_subscriptions WHERE user_sub=%s""", (user_sub,))
+            return [_push_row(r) for r in cur.fetchall()]
         return self.run(q)
 
     def list_push_subscriptions(self) -> list[dict]:
         def q(cur):
-            cur.execute("""SELECT user_sub, endpoint, endpoint_hash, p256dh, auth, user_agent
-                           FROM push_subscriptions""")
-            return [dict(zip(("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent"),
-                             r, strict=True)) for r in cur.fetchall()]
+            cur.execute(f"""SELECT {_PUSH_SELECT} FROM push_subscriptions""")
+            return [_push_row(r) for r in cur.fetchall()]
         return self.run(q)
 
     def claim_push_event(self, event_id: str, camera_id: str) -> bool:

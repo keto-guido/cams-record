@@ -30,13 +30,19 @@ import yaml
 log = logging.getLogger(__name__)
 
 CAMERA_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Ids App Hub's cams.json accepts (docs/camera-access.md); ids outside it still load but nobody can view them.
+REGISTRY_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 QUALITIES = ("main", "sub")
 
 DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "base_path": "/cams-record",
+    # Where cameras come from (docs/camera-model.md): file = cameras.yaml (default); shadow = cameras.yaml,
+    # while also reading cams_config and reporting every difference; db = cams_config.
+    "camera_source": "file",
     "http": {"host": "127.0.0.1", "port": 8097},
-    "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}"},
+    "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}",
+               "api_url": "http://127.0.0.1:1984"},  # stream list for the camera admin
     "recording": {
         "root": "/volume1/nvr",
         "segment_time": 60,  # seconds; cuts land on the first keyframe after each clock boundary
@@ -81,6 +87,9 @@ DEFAULTS: dict[str, Any] = {
     "access": {
         "enforce": True,  # false turns off per-camera checks (docs/camera-access.md)
         "registry_file": "/apphub-data/cams.json",  # App Hub's registry; bind its directory, not the file
+        # camera_source db only: write registry_file from cams_config on every change. The registry
+        # directory must then be mounted read-write for cams-record (and stay read-only elsewhere).
+        "publish_registry": False,
     },
     "push": {
         "enabled": True,  # still inactive until vapid_private_file is present
@@ -92,6 +101,9 @@ DEFAULTS: dict[str, Any] = {
         "interval_s": 15,
         "lookback_s": 120,
         "labels": [],  # empty = all labels; e.g. [person, car]
+        # Roles saved with a subscription (refreshed whenever the app opens) stop counting after this;
+        # the subscriber then only gets alerts for open cameras and cameras that name them.
+        "roles_max_age_days": 30,
         "ttl_s": 86400,
         "timeout_s": 10,
     },
@@ -102,6 +114,17 @@ DEFAULTS: dict[str, Any] = {
         "user": "cams_record",
         "password_file": "/run/secrets/db_password",
         "connect_timeout": 5,
+    },
+    # Camera objects (docs/camera-model.md). Only `python -m cams_record.camconfig` uses this so far.
+    "cams_config": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "cams_config",
+        "user": "cams_record",
+        "password_file": "/run/secrets/db_password",
+        "connect_timeout": 5,
+        "poll_s": 5,  # how often the revision is checked
+        "cache_file": "",  # last good camera objects; default recording.state_dir/cams_config.json
     },
 }
 
@@ -116,6 +139,8 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DETECTION_PROTECTION_ENABLED": (("detection_protection", "enabled"), bool),
     "DETECTION_PROTECTION_INTERVAL_S": (("detection_protection", "interval_s"), float),
     "DETECTION_PROTECTION_DAYS": (("detection_protection", "days"), float),
+    "CAMERA_SOURCE": (("camera_source",), str),
+    "ACCESS_PUBLISH_REGISTRY": (("access", "publish_registry"), bool),
     "AUTH_APP_ID": (("auth", "app_id"), str),
     "ACCESS_ENFORCE": (("access", "enforce"), bool),
     "ACCESS_REGISTRY_FILE": (("access", "registry_file"), str),
@@ -126,6 +151,7 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "AUTH_MODE": (("auth", "mode"), str),
     "AUTH_SECRET_FILE": (("auth", "secret_file"), str),
     "GO2RTC_RTSP_URL": (("go2rtc", "rtsp_url"), str),
+    "GO2RTC_API_URL": (("go2rtc", "api_url"), str),
     "RECORD_ROOT": (("recording", "root"), str),
     "SEGMENT_TIME": (("recording", "segment_time"), int),
     "STATE_DIR": (("recording", "state_dir"), str),
@@ -134,6 +160,12 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DB_NAME": (("db", "database"), str),
     "DB_USER": (("db", "user"), str),
     "DB_PASSWORD_FILE": (("db", "password_file"), str),
+    "CAMS_CONFIG_DB_HOST": (("cams_config", "host"), str),
+    "CAMS_CONFIG_DB_PORT": (("cams_config", "port"), int),
+    "CAMS_CONFIG_DB_NAME": (("cams_config", "database"), str),
+    "CAMS_CONFIG_DB_USER": (("cams_config", "user"), str),
+    "CAMS_CONFIG_DB_PASSWORD_FILE": (("cams_config", "password_file"), str),
+    "CAMS_CONFIG_CACHE_FILE": (("cams_config", "cache_file"), str),
     "PUSH_ENABLED": (("push", "enabled"), bool),
     "PUSH_VAPID_PRIVATE_FILE": (("push", "vapid_private_file"), str),
     "PUSH_VAPID_PUBLIC_KEY": (("push", "vapid_public_key"), str),
@@ -273,11 +305,30 @@ def _read_yaml(path: Path) -> dict:
     return data
 
 
+def camera_warnings(cam: CameraConfig, raw: dict | None) -> list[str]:
+    """Settings that load but are probably not what was meant. Behaviour is unchanged; these are logged."""
+    out = []
+    if not REGISTRY_ID_RE.match(cam.id):
+        out.append(f"camera {cam.id}: id is not valid in the App Hub camera registry (a-z, 0-9 and '-', not "
+                   "starting or ending with '-'); the registry drops it, so nobody can view its recordings")
+    if not (raw or {}).get("main_stream"):
+        out.append(f"camera {cam.id}: main_stream is not set, so stream '{cam.main_stream}' is recorded as main "
+                   f"(cams-detect defaults the high-resolution stream to '{cam.id}-main'); set main_stream explicitly")
+    if cam.sub_stream and cam.sub_stream == cam.main_stream and cam.record_main and cam.record_sub:
+        out.append(f"camera {cam.id}: main_stream and sub_stream are both '{cam.main_stream}', "
+                   "so the same stream is recorded twice")
+    return out
+
+
 def parse_cameras(data: dict) -> dict[str, CameraConfig]:
     raw = data.get("cameras") or {}
     if not isinstance(raw, dict):
         raise ValueError("cameras.yaml: 'cameras' must be a mapping of id -> settings")
-    return {str(cid): resolve_camera(str(cid), r) for cid, r in raw.items()}
+    cams = {str(cid): resolve_camera(str(cid), r) for cid, r in raw.items()}
+    for cid, cam in cams.items():
+        for msg in camera_warnings(cam, raw.get(cid)):
+            log.warning("%s", msg)
+    return cams
 
 
 def _positive(name: str, value: Any) -> None:
@@ -313,6 +364,19 @@ def validate(cfg: dict) -> dict:
         raise ValueError("access.enforce must be true or false")
     if cfg["access"]["enforce"] and not cfg["access"]["registry_file"]:
         raise ValueError("access.registry_file is required while access.enforce is true")
+    if cfg["camera_source"] not in ("file", "shadow", "db"):
+        raise ValueError("camera_source must be file, shadow or db")
+    if not isinstance(cfg["access"].get("publish_registry", False), bool):
+        raise ValueError("access.publish_registry must be true or false")
+    if cfg["access"].get("publish_registry"):
+        if cfg["camera_source"] != "db":
+            raise ValueError("access.publish_registry needs camera_source: db")
+        if not cfg["access"]["registry_file"]:
+            raise ValueError("access.publish_registry needs access.registry_file")
+    cc = cfg["cams_config"]
+    _positive("cams_config.poll_s", cc["poll_s"])
+    if not cc.get("cache_file"):
+        cc["cache_file"] = str(Path(cfg["recording"]["state_dir"]) / "cams_config.json")
     rec = cfg["recording"]
     if int(rec["segment_time"]) < 2:
         raise ValueError("recording.segment_time must be >= 2 seconds")
@@ -341,7 +405,7 @@ def validate(cfg: dict) -> dict:
     for key in ("enabled", "poll_enabled"):
         if key in push and not isinstance(push[key], bool):
             raise ValueError(f"push.{key} must be true or false")
-    for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s"):
+    for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s", "roles_max_age_days"):
         if key in push:
             _positive(f"push.{key}", push[key])
     labels = push.get("labels") or []

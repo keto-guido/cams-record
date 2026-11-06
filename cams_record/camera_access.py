@@ -122,16 +122,29 @@ class CameraRegistry:
 
 class CameraAccess:
     def __init__(self, cfg: dict, cameras=None):
-        # Copy configured raw sources once; registry ACLs remain live on every request.
-        # Each logical camera id maps to its (main_stream, sub_stream) tuple from cameras.yaml.
-        self.sources = {cid: tuple(src for src in (cam.main_stream, cam.sub_stream) if src)
-                        for cid, cam in (cameras or {}).items()}
-        self.source_owners = {}
-        for cid, sources in self.sources.items():
-            for source in sources:
-                self.source_owners.setdefault(source, set()).add(cid)
+        # Registry ACLs stay live on every request. The configured streams are swapped as one
+        # snapshot by set_cameras() when the camera list changes (cams_config), never piecemeal.
+        self.set_cameras(cameras or {})
         self.enforce = cfg["enforce"]
         self.registry = CameraRegistry(cfg["registry_file"])
+
+    def set_cameras(self, cameras) -> None:
+        """Each logical camera id maps to its (main_stream, sub_stream) tuple."""
+        sources = {cid: tuple(src for src in (cam.main_stream, cam.sub_stream) if src)
+                   for cid, cam in cameras.items()}
+        owners: dict[str, set[str]] = {}
+        for cid, srcs in sources.items():
+            for source in srcs:
+                owners.setdefault(source, set()).add(cid)
+        self._map = (sources, owners)
+
+    @property
+    def sources(self) -> dict:
+        return self._map[0]
+
+    @property
+    def source_owners(self) -> dict:
+        return self._map[1]
 
     def allowed(self, camera: str, who: Viewer) -> bool:
         """Authorize a logical camera for recorded footage (timeline/export/clip/…).
@@ -149,20 +162,34 @@ class CameraAccess:
         if who.claimed_user is not None and who.claimed_user != who.user:
             return False
         cameras = self.registry.current()
-        sources = self.sources.get(camera)
+        source_map, source_owners = self._map  # one consistent snapshot for this decision
+        sources = source_map.get(camera)
         if not (camera in cameras and bool(sources)):
             return False
         user, roles = who.user, who.roles
         if not can_stream(cameras, camera, user, roles):
             return False
         for src in sources:
-            owners = self.source_owners[src]
+            owners = source_owners[src]
             if not all(can_stream(cameras, owner, user, roles) for owner in owners):
                 return False
             if any(src in (c.id, c.snap) for c in cameras.values()):
                 if not can_stream(cameras, src, user, roles):
                     return False
         return True
+
+    def registered(self, camera: str) -> bool:
+        return camera in self.registry.current()
+
+    def can_view_camera(self, camera: str, who: Viewer) -> bool:
+        """Registry decision for one camera id, without recordings: used for detection alerts.
+
+        Same rule as a stream name: every registry entry whose id or snap equals ``camera`` must allow
+        the viewer. Unregistered cameras and an unusable registry deny everyone, admins included.
+        """
+        if who.claimed_user is not None and who.claimed_user != who.user:
+            return False
+        return can_stream(self.registry.current(), camera, who.user, who.roles)
 
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):

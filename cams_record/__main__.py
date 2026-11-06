@@ -31,7 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     from .service import Service
 
     db = None if args.no_db else Database(cfg["db"])
-    service = Service(cfg, cameras, db)
+    source, file_cameras = None, cameras
+    if cfg["camera_source"] != "file":
+        source, cameras = camera_source(cfg, cameras, log)
+    service = Service(cfg, cameras, db, source, file_cameras=file_cameras)
     stop = threading.Event()
 
     def on_signal(signum, _frame):
@@ -61,6 +64,28 @@ def main(argv: list[str] | None = None) -> int:
     service.stop()
     log.info("stopped")
     return 0
+
+
+def camera_source(cfg: dict, file_cameras: dict, log):
+    """(CameraSource, cameras to record at startup) for camera_source shadow or db.
+
+    shadow always records from cameras.yaml. db records from cams_config, or from its cache while the
+    database is down; with neither it starts from cameras.yaml and switches once cams_config loads.
+    """
+    from .camconfig.source import CameraSource
+    from .camconfig.views import record_camera
+
+    source = CameraSource(cfg["cams_config"], cfg["cams_config"]["cache_file"])
+    loaded = source.load_initial()
+    if cfg["camera_source"] == "shadow":
+        return source, file_cameras
+    if not loaded:
+        log.error("camera_source db: cams_config and its cache are both unavailable; recording from "
+                  "cameras.yaml until cams_config can be read")
+        return source, file_cameras
+    cameras = {cid: record_camera(o) for cid, o in source.cameras.items()}
+    cfg["retention"]["cameras"] = {cid: dict(o.recording) for cid, o in source.cameras.items() if o.recording}
+    return source, cameras
 
 
 if __name__ == "__main__":

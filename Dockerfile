@@ -20,7 +20,7 @@ COPY cams_record /app/cams_record
 COPY scripts /app/scripts
 COPY config/config.example.yaml config/cameras.example.yaml /app/config/
 
-RUN mkdir -p /config /volume1/nvr /tmp/cams-record
+RUN mkdir -p /config /data /volume1/nvr /tmp/cams-record
 
 EXPOSE 8097
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \

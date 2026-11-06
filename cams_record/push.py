@@ -152,9 +152,13 @@ def notification_payload(event: DetectionEvent, *, test: bool = False) -> dict[s
 class PushService:
     """Owns VAPID config, subscription CRUD helpers, and fan-out sends."""
 
-    def __init__(self, db, cfg: dict):
+    def __init__(self, db, cfg: dict, access=None):
         self.db = db
         self.cfg = cfg
+        # CameraAccess: detection pushes go only to subscribers who may view the camera.
+        # None (or access.enforce false) keeps the old behaviour of sending to everyone.
+        self.access = access
+        self._unregistered_warned: set[str] = set()
         self._private_pem: str | None = None
         self._vapid = None
         self._public_b64: str | None = None
@@ -231,14 +235,48 @@ class PushService:
             "endpoint_subscribed": bool(match) if endpoint else None,
         }
 
-    def upsert(self, user_sub: str, body: dict) -> dict:
+    def upsert(self, user_sub: str, body: dict, roles=None) -> dict:
         if not self.enabled:
             raise PushError(503, "push not configured")
         if self.db is None:
             raise PushError(503, "database unavailable")
         sub = validate_subscription(body)
-        self.db.upsert_push_subscription(user_sub, sub)
+        self.db.upsert_push_subscription(user_sub, sub, roles=roles)
         return {"ok": True, "subscribed": True}
+
+    def refresh_roles(self, user_sub: str, roles) -> None:
+        """Remember the roles of a verified request so later pushes are filtered by current access."""
+        if self.db is None or not self.enabled:
+            return
+        try:
+            self.db.refresh_push_roles(user_sub, roles)
+        except Exception:  # noqa: BLE001  (status must still answer while the DB hiccups)
+            log.warning("push: could not refresh roles for a subscriber", exc_info=True)
+
+    def subscriber_roles(self, row: dict) -> tuple[str, ...]:
+        """Roles stored with a subscription, or none when unknown or older than roles_max_age_days.
+
+        No roles still allows open cameras and cameras that name the user, so stale rows under-grant.
+        """
+        raw, at = row.get("roles_json"), row.get("roles_at")
+        max_age = float(self.cfg.get("roles_max_age_days", 30)) * 86400
+        if not raw or at is None or time.time() - float(at) > max_age:
+            return ()
+        try:
+            roles = json.loads(raw)
+        except ValueError:
+            return ()
+        if not isinstance(roles, list):
+            return ()
+        return tuple(r for r in roles if isinstance(r, str) and r)
+
+    def may_receive(self, row: dict, camera_id: str) -> bool:
+        if self.access is None or not self.access.enforce:
+            return True
+        from .camera_access import Viewer
+
+        return self.access.can_view_camera(camera_id, Viewer(str(row.get("user_sub") or ""),
+                                                             self.subscriber_roles(row)))
 
     def remove(self, user_sub: str, endpoint: str) -> dict:
         if self.db is None:
@@ -300,15 +338,23 @@ class PushService:
                 return {"ok": True, "deduped": True, "sent": 0}
         payload = notification_payload(event, test=test)
         rows = self.db.list_push_subscriptions()
+        if not test and self.access is not None and self.access.enforce:
+            if not self.access.registered(event.camera_id) and event.camera_id not in self._unregistered_warned:
+                self._unregistered_warned.add(event.camera_id)
+                log.warning("push: camera %s is not in the camera registry; nobody is notified for it",
+                            event.camera_id)
+            allowed = [r for r in rows if self.may_receive(r, event.camera_id)]
+        else:
+            allowed = rows
         sent = failed = 0
-        for row in rows:
+        for row in allowed:
             ok, _ = self.send_raw(row, payload)
             if ok:
                 sent += 1
             else:
                 failed += 1
         return {"ok": True, "sent": sent, "failed": failed, "subscribers": len(rows),
-                "event_id": event.id, "payload_url": payload["url"]}
+                "filtered": len(rows) - len(allowed), "event_id": event.id, "payload_url": payload["url"]}
 
     def notify_user(self, user_sub: str, event: DetectionEvent, *, test: bool = True) -> dict:
         if not self.enabled:

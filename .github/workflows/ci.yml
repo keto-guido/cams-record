@@ -44,7 +44,19 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+              && sudo apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 ffmpeg; then
+              exit 0
+            fi
+            echo "apt ffmpeg install failed (attempt ${attempt}); retrying..." >&2
+            sleep $((attempt * 5))
+          done
+          echo "apt ffmpeg install failed after retries" >&2
+          exit 1
       - name: Install Python deps
         run: pip install -r requirements-dev.txt
       - name: Grant access to the isolated production-shaped detection test schema
@@ -54,16 +66,42 @@ jobs:
           conn = pymysql.connect(host="127.0.0.1", user="root", password="rootpw", autocommit=True)
           with conn.cursor() as cur:
               cur.execute("GRANT ALL ON cams_detect.* TO 'cams_record'@'%'")
+              cur.execute("CREATE DATABASE IF NOT EXISTS cams_config_test")
+              cur.execute("GRANT ALL ON cams_config_test.* TO 'cams_record'@'%'")
           conn.close()
           PY
       - name: Unit tests (MariaDB-backed)
-        run: python -m pytest -q -rs -m "not integration" | tee /tmp/unit.txt
+        run: |
+          set -euo pipefail
+          python -m pytest -q -rs -m "not integration" | tee /tmp/unit.txt
       - name: Fail if MariaDB tests were skipped
-        run: "! grep -q 'SKIPPED' /tmp/unit.txt"
+        run: |
+          set -euo pipefail
+          if ! test -s /tmp/unit.txt; then
+            echo "unit test log missing; pytest result was not captured" >&2
+            exit 1
+          fi
+          if grep -q 'SKIPPED' /tmp/unit.txt; then
+            echo "Required MariaDB tests were skipped" >&2
+            grep 'SKIPPED' /tmp/unit.txt >&2 || true
+            exit 1
+          fi
       - name: Integration test (3 x 60 s segments from a looped testsrc file)
-        run: python -m pytest -q -rs -m integration | tee /tmp/integration.txt
+        run: |
+          set -euo pipefail
+          python -m pytest -q -rs -m integration | tee /tmp/integration.txt
       - name: Fail if the integration test was skipped
-        run: "! grep -q 'SKIPPED' /tmp/integration.txt"
+        run: |
+          set -euo pipefail
+          if ! test -s /tmp/integration.txt; then
+            echo "integration test log missing; pytest result was not captured" >&2
+            exit 1
+          fi
+          if grep -q 'SKIPPED' /tmp/integration.txt; then
+            echo "Required integration tests were skipped" >&2
+            grep 'SKIPPED' /tmp/integration.txt >&2 || true
+            exit 1
+          fi
 
   docker:
     runs-on: ubuntu-latest
