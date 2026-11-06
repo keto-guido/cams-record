@@ -163,6 +163,7 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "CAMS_CONFIG_DB_NAME": (("cams_config", "database"), str),
     "CAMS_CONFIG_DB_USER": (("cams_config", "user"), str),
     "CAMS_CONFIG_DB_PASSWORD_FILE": (("cams_config", "password_file"), str),
+    "CAMS_CONFIG_CACHE_FILE": (("cams_config", "cache_file"), str),
     "PUSH_ENABLED": (("push", "enabled"), bool),
     "PUSH_VAPID_PRIVATE_FILE": (("push", "vapid_private_file"), str),
     "PUSH_VAPID_PUBLIC_KEY": (("push", "vapid_public_key"), str),

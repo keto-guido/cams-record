@@ -2,7 +2,8 @@
 
 This is the design for how cameras are defined across the camera system. The same file is in
 `cams-record/docs/` and `cams-detect/docs/`; keep both copies identical, like `camera-access.md`.
-cams-record owns the `cams_config` database and its code (`cams_record/camconfig/`).
+cams-record owns the `cams_config` database and its code (`cams_record/camconfig/`); cams-detect
+reads it with `cams_detect/camconfig.py`.
 
 ## Goals
 
@@ -124,16 +125,18 @@ Global `push.labels` stays the default for cameras without a push rule.
 | Component | Access |
 |---|---|
 | cams-record (camera app backend, admin pages) | owns the schema (runs migrations), reads and writes everything |
-| cams-detect | reads everything; will write only `camera_detection` (mask editor) |
-| App Hub | nothing directly: it keeps reading `cams.json`, generated from cams_config |
+| cams-detect | reads everything; writes only `camera_detection` (mask editor, detection switch), bumping `config_revision` and appending to `config_audit` |
+| App Hub | nothing directly: it keeps reading `cams.json`, which cams-record publishes from cams_config (`access.publish_registry`) |
 | Reporting (Grafana, Home Assistant SQL) | optional read-only user |
 
 ## Safety rules
 
 1. **A database outage never stops recording or detection.** Services keep the last good camera
    objects in a local cache file and keep running on them while they retry.
-2. **Permissions still fail closed.** If access data cannot be refreshed within a set limit, access is
-   denied, as today when `cams.json` is unreadable.
+2. **Permissions still fail closed.** Every service keeps enforcing `cams.json` exactly as today: a
+   missing or unreadable file denies everyone. cams-record only replaces it with a complete, valid
+   file, and a database outage leaves the last published file in place; no access can change while
+   the database is down, so an outage cannot widen access.
 3. **Reloads are cheap and exact.** Readers poll `config_revision` every few seconds and reload only
    when it changes; writes are single transactions, so a reader never sees half a change.
 4. **Concurrent admin edits cannot overwrite each other**: writes carry the revision they were based on
@@ -152,14 +155,26 @@ As a MariaDB admin on the NAS:
 ```sql
 CREATE DATABASE IF NOT EXISTS cams_config CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 GRANT ALL PRIVILEGES ON cams_config.* TO 'cams_record'@'127.0.0.1';
-GRANT SELECT ON cams_config.* TO 'cams_detect'@'127.0.0.1';
 FLUSH PRIVILEGES;
 ```
 
+Then create the tables (cams-record does it on first use; `python -m cams_record.camconfig show`
+is enough) and give cams-detect exactly what it needs. Table grants need the tables to exist:
+
+```sql
+GRANT SELECT ON cams_config.* TO 'cams_detect'@'127.0.0.1';
+GRANT INSERT, UPDATE ON cams_config.camera_detection TO 'cams_detect'@'127.0.0.1';
+GRANT UPDATE ON cams_config.config_revision TO 'cams_detect'@'127.0.0.1';
+GRANT INSERT ON cams_config.config_audit TO 'cams_detect'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+cams-detect's CI runs its tests as a user with exactly these grants
+(`scripts/grant_camconfig_test.py`), and checks it cannot write anything else.
+
 Use the host part (`127.0.0.1`, `%`, LAN range) your existing `cams_record` and `cams_detect` users
-have. cams-record connects with the `cams_config` section of its `config.yaml` (defaults: same host,
-user `cams_record`, its existing password file) or `CAMS_CONFIG_DB_*` environment variables. Tables
-are created on first use.
+have. Both services connect with the `cams_config` section of their `config.yaml` (defaults: same
+host, their existing user and password file) or `CAMS_CONFIG_DB_*` environment variables.
 
 ## Importing today's cameras
 
@@ -172,11 +187,90 @@ python -m cams_record.camconfig import --detect /detect-config/cameras.yaml --re
 
 It prints `CONFLICT` (must be fixed in the files first), `DIFFERENCE` (would change behaviour) and
 `WARNING` (read before applying) lines. Add `-v` to see the planned camera objects. When there are no
-conflicts or differences, add `--apply`. Nothing in the running services reads cams_config yet, so
-applying changes no behaviour.
+conflicts or differences, add `--apply`. Applying changes no behaviour: the services only read
+cams_config once `camera_source` is set to `shadow` or `db`.
 
 To check, `python -m cams_record.camconfig show` prints the stored objects, and
 `python -m cams_record.camconfig export-registry` prints the `cams.json` cams_config would produce.
+
+## Shadow mode and switching (phases 3 and 4)
+
+Both services have `camera_source` (`CAMERA_SOURCE`): `file` (default, today's behaviour),
+`shadow` or `db`. Nothing changes until it is set.
+
+### Shadow
+
+Set `camera_source: shadow` in both services and restart them.
+
+| | cams-record | cams-detect |
+|---|---|---|
+| Uses | `cameras.yaml` and `config.yaml` retention, as before | `cameras.yaml`, as before |
+| Compares | streams recorded, main/sub stream names (they also authorize old footage), retention overrides | every resolved setting (streams, masks, zones, classes, motion, fps, ...), names, cameras missing on either side |
+| Edits | none (cams-record's files are not edited at runtime) | mask editor and detection switch write `cameras.yaml` and are mirrored into `camera_detection`; a failed mirror never fails the edit |
+| Report | log lines `cams_config shadow: ...`, and `/cams-record/api/status` -> `camera_source.differences` | log lines `cams_config shadow: ...`, and `/cams-detect/api/status` -> `service.camera_source.differences` (admins) |
+
+`differences: []` means switching that service changes nothing. A camera added on the cams-detect
+Cameras page during shadow shows as "only in cameras.yaml": re-run the import (it only adds new
+cameras) to bring it in. Name differences matter: in `db` mode Home Assistant device names follow
+the cams_config name (entity ids do not change).
+
+Phase 3 is done when both reports stay empty for a period you trust, including a mask edit and a
+database restart.
+
+### Switching
+
+One service at a time; each step is a setting and a restart.
+
+1. **cams-record `camera_source: db`.** Recorders follow cams_config. On a change only the affected
+   recorders restart (the old ffmpeg is joined before the new one starts); the access map and
+   retention overrides switch with them.
+2. **cams-detect `camera_source: db`.** Cameras, streams and detection settings come from cams_config
+   and hot-reload; unchanged cameras keep running untouched. The mask editor and detection switch
+   save to cams_config. Adding or renaming a camera on the Cameras page answers 409: that is done in
+   the camera app's admin pages. A camera cams-detect cannot use (for example an id over 48
+   characters) is skipped and listed under `camera_source.skipped`.
+3. **cams-record publishes `cams.json`** (`access.publish_registry: true`, db mode only). Before
+   enabling:
+   - mount the dedicated registry directory read-write for cams-record (it is `:ro` today), and keep
+     it read-only for cams-detect;
+   - stop the hub from editing `cams.json` itself: from now on cameras and access are changed in
+     cams_config, and any other write is overwritten on the next change.
+
+   cams-record writes the file by atomic rename only when its content changes, and refuses (keeping
+   the old file, error in `camera_source.registry.error`) if the registry would drop any camera.
+
+### When the database is unavailable
+
+| Situation | cams-record | cams-detect |
+|---|---|---|
+| Database down while running | keeps recording the loaded cameras; retries every `poll_s` | keeps detecting; saving masks or the detection switch answers 503 |
+| Database down at startup, cache present | starts from the cache file | starts from the cache file |
+| Neither database nor cache | records from `cameras.yaml`, switches when cams_config loads | runs on `cameras.yaml` read-only (edits answer 503), switches when cams_config loads |
+| `cams.json` | the published file stays as it is | unaffected (it reads `cams.json` as today) |
+
+Cache files: cams-record `CAMS_CONFIG_CACHE_FILE` (compose: `./data/cams_config.json`), cams-detect
+`storage.data_dir/cams_config.json` (`./data`). Both are rewritten after every successful load.
+
+### Rollback
+
+Set `camera_source: file` and restart. To keep changes made in cams_config since the switch, first
+write the files from it:
+
+```bash
+python -m cams_record.camconfig export-files --record-out /tmp/record-cameras.yaml --detect-out /tmp/detect-cameras.yaml
+```
+
+It prints the `retention.cameras` section for cams-record's `config.yaml`. Review the files, then
+put them in place of each service's `config/cameras.yaml`. They behave like the originals
+(`tests/test_camsource.py::test_export_files_round_trip`); comments are not kept.
+
+### Keeping the two repositories in step
+
+cams-record owns the schema and the views. `scripts/gen_camconfig_contracts.py` writes
+`contracts/camconfig_schema.sql` and `contracts/camconfig_vectors.json`; copy both into cams-detect's
+`contracts/` whenever they change. cams-record's tests fail while they are stale, and cams-detect's
+tests check its reader against the vectors and (when both repositories are checked out side by
+side) that the copies are identical.
 
 ## Phases
 
@@ -184,16 +278,16 @@ To check, `python -m cams_record.camconfig show` prints the stored objects, and
 |---|---|---|
 | 1 | Push alerts follow camera access; warnings for stream defaults and ids | done |
 | 2 | cams_config schema, store, import with equivalence check, registry export | done |
-| 3 | Shadow mode: cams-record and cams-detect read cams_config, compare with files, keep using files | next |
-| 4 | Switch each service to `camera_source: db`; cams-record publishes `cams.json` from cams_config | |
-| 5 | Admin pages in the camera app: cameras, streams and purposes, access, detection | |
+| 3 | Shadow mode in cams-record and cams-detect | built; off until `camera_source: shadow` |
+| 4 | `camera_source: db` in both, `cams.json` published from cams_config, `export-files` rollback | built; off until switched |
+| 5 | Admin pages in the camera app: cameras, streams and purposes, access, detection | next |
 | 6 | Per-camera notification rules (push, MQTT) | |
 | 7 | `tunnel_webcam` connector | |
 
 ### Open questions
 
-- Phase 4: cams-record will write `cams.json` for the hub, so it needs a writable mount of the
-  dedicated registry directory (today read-only). Alternatively the hub reads a small endpoint from
-  the camera app.
+- Phase 4: the hub's own camera editing must be switched off before `access.publish_registry` is
+  enabled (the hub's code is not in these repositories).
 - Phase 5: the admin pages need the hub to send the `admin` role in the JWT to the camera app (it
-  already does for cams-detect writes).
+  already does for cams-detect writes). Until they exist, cameras and access are changed with the
+  `camconfig` command line or the database.

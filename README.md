@@ -545,9 +545,11 @@ order are in [docs/camera-access.md](docs/camera-access.md).
 Cameras are moving to one camera object per camera, stored in the MariaDB database `cams_config`:
 streams, which stream does which job (live, detect, verify, snapshot, record), access, detection,
 recording and notification settings. cams-record owns the schema (`cams_record/camconfig/`).
-Nothing in the running services reads it yet; `python -m cams_record.camconfig import` loads today's
-files into it after proving nothing would change. Design, setup SQL, import steps and phases:
-[docs/camera-model.md](docs/camera-model.md).
+`python -m cams_record.camconfig import` loads today's files into it after proving nothing would
+change. `camera_source` (`CAMERA_SOURCE`) picks where cameras come from: `file` (default), `shadow`
+(files, while reporting every difference cams_config would make) or `db`; with `db`,
+`access.publish_registry` also writes App Hub's `cams.json` from it. Design, setup SQL, import,
+shadow, switching and rollback: [docs/camera-model.md](docs/camera-model.md).
 
 ## Timeline, playback and range exports (Phase 3)
 
