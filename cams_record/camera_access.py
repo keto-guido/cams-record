@@ -123,6 +123,7 @@ class CameraRegistry:
 class CameraAccess:
     def __init__(self, cfg: dict, cameras=None):
         # Copy configured raw sources once; registry ACLs remain live on every request.
+        # Each logical camera id maps to its (main_stream, sub_stream) tuple from cameras.yaml.
         self.sources = {cid: tuple(src for src in (cam.main_stream, cam.sub_stream) if src)
                         for cid, cam in (cameras or {}).items()}
         self.source_owners = {}
@@ -133,15 +134,35 @@ class CameraAccess:
         self.registry = CameraRegistry(cfg["registry_file"])
 
     def allowed(self, camera: str, who: Viewer) -> bool:
+        """Authorize a logical camera for recorded footage (timeline/export/clip/…).
+
+        - Parent camera id must pass registry ``can_stream`` (exact id/snap).
+        - Every cameras.yaml ``main_stream`` / ``sub_stream`` keeps all ``source_owners`` grants
+          via ``can_stream(owner)``.
+        - If a source is an explicit registered id or snap, also require ``can_stream(src)``
+          exactly (do not weaken shared/restricted stream auth).
+        - If a source is only a config alias (not registered as id/snap), inherit those parent
+          ``source_owners`` grants — no helper registry row and no ``-main`` suffix stripping.
+        - Missing cameras.yaml mapping or unknown camera denies, including for admins.
+        - Requesting ``cam=<helper>`` without a registry row does not inherit parent capability.
+        """
         if who.claimed_user is not None and who.claimed_user != who.user:
             return False
         cameras = self.registry.current()
         sources = self.sources.get(camera)
-        return (camera in cameras and bool(sources)
-                and can_stream(cameras, camera, who.user, who.roles)
-                and all(can_stream(cameras, src, who.user, who.roles)
-                        and all(can_stream(cameras, owner, who.user, who.roles)
-                                for owner in self.source_owners[src]) for src in sources))
+        if not (camera in cameras and bool(sources)):
+            return False
+        user, roles = who.user, who.roles
+        if not can_stream(cameras, camera, user, roles):
+            return False
+        for src in sources:
+            owners = self.source_owners[src]
+            if not all(can_stream(cameras, owner, user, roles) for owner in owners):
+                return False
+            if any(src in (c.id, c.snap) for c in cameras.values()):
+                if not can_stream(cameras, src, user, roles):
+                    return False
+        return True
 
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):

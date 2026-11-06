@@ -10,7 +10,7 @@ import fastapi.routing
 import pytest
 from fastapi.testclient import TestClient
 
-from cams_record.camera_access import CameraRegistry, can_access, can_stream, parse_registry
+from cams_record.camera_access import CameraAccess, CameraRegistry, Viewer, can_access, can_stream, parse_registry
 from cams_record.config import DEFAULTS, apply_env, deep_merge, resolve_camera, validate
 from cams_record.web import create_app
 from tests.test_clips import seg
@@ -331,10 +331,13 @@ def test_invalid_boolean_env_fails(name, value):
 
 
 @pytest.mark.parametrize("quality", ["main_stream", "sub_stream"])
-@pytest.mark.parametrize("source,user,allowed", [("private", "bob", False), ("private", "ann", True),
-                                               ("unknown", "root", False), ("shared-raw", "bob", False),
-                                               ("shared-raw", "ann", True)])
-def test_configured_sources_are_checked_before_database(tmp_path, quality, source, user, allowed):
+@pytest.mark.parametrize("source,user,allowed", [
+    # Explicit registered id/snap sources keep exact can_stream(src) (not weakened).
+    ("private", "bob", False), ("private", "ann", True),
+    ("shared-raw", "bob", False), ("shared-raw", "ann", True),
+])
+def test_explicit_registered_sources_keep_can_stream(tmp_path, quality, source, user, allowed):
+    """When a configured source is a registry id or snap, can_stream(src) still applies."""
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY + [
         {"id": "shared-private", "name": "Restricted alias", "snap": "shared-raw", "users": ["ann"]}]))
@@ -343,6 +346,8 @@ def test_configured_sources_are_checked_before_database(tmp_path, quality, sourc
     cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)},
                                 "access": {"registry_file": str(registry)},
                                 "recording": {"state_dir": str(tmp_path / "state")}})
+    # Keep main_stream=open so open remains an explicit registered source alongside `source`
+    # when quality is sub_stream; when quality is main_stream, `source` replaces main.
     cameras = {"open": resolve_camera("open", {"main_stream": "open", quality: source})}
     db = Mock()
     db.segment_rows.return_value = []
@@ -353,8 +358,22 @@ def test_configured_sources_are_checked_before_database(tmp_path, quality, sourc
     assert touched(db) is allowed
 
 
+def test_unregistered_name_without_config_owner_cannot_be_streamed(tmp_path):
+    """can_stream itself still denies unknown names; allowed() never invents go2rtc aliases."""
+    cameras = parse_registry(json.dumps(REGISTRY))
+    assert can_stream(cameras, "unknown", "root", ("admin",)) is False
+    assert can_stream(cameras, "private-main", "ann", ("cams",)) is False
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY))
+    access = CameraAccess(
+        {"enforce": True, "registry_file": str(registry)},
+        {"open": resolve_camera("open", {"main_stream": "open", "sub_stream": "open"})},
+    )
+    assert not access.allowed("unknown", Viewer("root", ("admin",)))
+    assert not access.allowed("private-main", Viewer("root", ("admin",)))
+
+
 def test_missing_source_mapping_denies_even_admin(tmp_path):
-    from cams_record.camera_access import CameraAccess, Viewer
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY))
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, {})
@@ -363,9 +382,139 @@ def test_missing_source_mapping_denies_even_admin(tmp_path):
 
 @pytest.mark.parametrize("user,allowed", [("bob", False), ("ann", True)])
 def test_configured_shared_source_requires_all_camera_owners(tmp_path, user, allowed):
-    from cams_record.camera_access import CameraAccess, Viewer
     registry = tmp_path / "cams.json"
     registry.write_text(json.dumps(REGISTRY))
     cameras = {cid: resolve_camera(cid, {"main_stream": "open"}) for cid in ("open", "private")}
     access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
     assert access.allowed("open", Viewer(user, ("cams",))) is allowed
+
+
+@pytest.mark.parametrize("user,roles,parent_ok", [
+    ("ann", ("cams",), True),
+    ("bob", ("cams",), False),
+    ("root", ("admin",), True),
+    ("", ("admin",), False),
+])
+def test_unregistered_config_alias_inherits_parent_source_owners(tmp_path, user, roles, parent_ok):
+    """Config alias not registered as id/snap inherits; no -main stripping; main!=sub!=id."""
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps([
+        {"id": "private", "name": "Private", "users": ["ann"]},
+        {"id": "open", "name": "Open"},
+        {"id": "main-street", "name": "Main Street", "users": ["ann"]},
+        {"id": "dock-main", "name": "Dock low-res", "users": ["ann"]},
+    ]))  # no helper rows
+    cameras = {
+        "private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"}),
+        "open": resolve_camera("open", {"main_stream": "open-hires", "sub_stream": "open"}),
+        # Live-shaped mismatch: neither stream equals the logical id or <id>-main.
+        "main-street": resolve_camera("main-street", {
+            "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        }),
+        # Logical id itself ends in -main; HD alias is unrelated.
+        "dock-main": resolve_camera("dock-main", {
+            "main_stream": "dock-main-hires", "sub_stream": "dock-main",
+        }),
+    }
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert access.allowed("private", Viewer(user, roles)) is parent_ok
+    assert access.allowed("open", Viewer(user, roles)) is bool(user)
+    assert access.allowed("main-street", Viewer(user, roles)) is parent_ok
+    assert access.allowed("dock-main", Viewer(user, roles)) is parent_ok
+    # Defaults main==id would hide this: empty config is not the live shape.
+    assert resolve_camera("main-street", {}).main_stream == "main-street"
+    assert cameras["main-street"].main_stream != cameras["main-street"].id
+    assert cameras["main-street"].sub_stream != cameras["main-street"].id
+    assert cameras["main-street"].main_stream != cameras["main-street"].sub_stream
+
+
+def test_explicit_registered_helper_still_requires_can_stream_src(tmp_path):
+    """Leftover helper registry rows remain exact can_stream(src); source_owners still apply."""
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY + [
+        {"id": "private-main", "name": "Stale helper", "users": ["zed"]}]))
+    cameras = {"private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"})}
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert not access.allowed("private", Viewer("ann", ("cams",)))  # helper blocks
+    assert not access.allowed("private", Viewer("zed", ("cams",)))  # parent blocks
+    assert access.allowed("private", Viewer("root", ("admin",)))
+
+
+def test_unregistered_helper_camera_id_does_not_inherit(tmp_path):
+    """cam=<helper> without a registry row is denied; no App Hub stream alias is created."""
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY + [
+        {"id": "main-street", "name": "Main Street", "users": ["ann"]}]))
+    cameras = {
+        "private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"}),
+        "main-street": resolve_camera("main-street", {
+            "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        }),
+    }
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert access.allowed("private", Viewer("ann", ("cams",)))
+    assert access.allowed("main-street", Viewer("ann", ("cams",)))
+    for helper in ("private-main", "main-st-south", "main-st-south-main"):
+        assert not access.allowed(helper, Viewer("ann", ("cams",)))
+        assert not access.allowed(helper, Viewer("root", ("admin",)))
+
+
+def test_hd_clip_export_parent_only_without_helper_registry(tmp_path, monkeypatch):
+    """HD /api/clip|export on the parent inherits; unregistered helpers stay 404."""
+    from cams_record.media import Media
+
+    secret = tmp_path / "secret"
+    secret.write_text(SECRET)
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps([
+        {"id": "private", "name": "Private", "users": ["ann"]},
+        {"id": "main-street", "name": "Main Street", "users": ["ann"]},
+        {"id": "dock-main", "name": "Dock", "users": ["ann"]},
+    ]))
+    root = tmp_path / "nvr"
+    root.mkdir()
+    (root / "a.mp4").write_bytes(b"segment")
+    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)}, "access": {"registry_file": str(registry)},
+                                "recording": {"root": str(root), "state_dir": str(tmp_path / "state")}})
+    cameras = {
+        "private": resolve_camera("private", {"main_stream": "private-main", "sub_stream": "private"}),
+        "main-street": resolve_camera("main-street", {
+            "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        }),
+        "dock-main": resolve_camera("dock-main", {
+            "main_stream": "dock-main-hires", "sub_stream": "dock-main",
+        }),
+    }
+    db = Mock()
+    db.segment_rows.return_value = [seg() | {"id": 1, "camera_id": "private", "quality": "sub"}]
+    db.clip_segments.return_value = ([seg() | {"camera_id": "private", "quality": "main"}], 60)
+    db.segment_by_id.return_value = None
+    client = TestClient(create_app(SimpleNamespace(db=db, cameras=cameras), cfg))
+
+    def clip_run(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"0123456789")
+        return SimpleNamespace(returncode=0)
+
+    def media_run(self, command, timeout):
+        Path(command[-1]).write_bytes(b"export-bytes")
+        return True
+
+    monkeypatch.setattr("cams_record.clips.subprocess.run", clip_run)
+    monkeypatch.setattr(Media, "run", media_run)
+
+    assert client.get("/api/timeline?cam=private&start=0&end=60", headers=headers("ann")).status_code == 200
+    assert client.get("/api/timeline?cam=main-street&start=0&end=60", headers=headers("ann")).status_code == 200
+    assert client.get("/api/timeline?cam=dock-main&start=0&end=60", headers=headers("ann")).status_code == 200
+    export = client.get("/api/export?cam=private&start=10&end=40&quality=main", headers=headers("ann"))
+    assert export.status_code == 200 and export.headers.get("x-export-quality") == "main"
+    assert client.get("/api/clip?camera=private&start=10&end=40&quality=main",
+                      headers=headers("ann")).status_code == 200
+    db.clip_segments.return_value = ([seg() | {"camera_id": "main-street", "quality": "main"}], 60)
+    assert client.get("/api/export?cam=main-street&start=10&end=40&quality=main",
+                      headers=headers("ann")).status_code == 200
+    assert client.get("/api/export?cam=private&start=10&end=40&quality=main", headers=headers("bob")).status_code == 404
+    for helper in ("private-main", "main-st-south", "main-st-south-main", "dock-main-hires"):
+        assert client.get(f"/api/export?cam={helper}&start=10&end=40&quality=main",
+                          headers=headers("ann")).status_code == 404
+        assert client.get(f"/api/export?cam={helper}&start=10&end=40&quality=main",
+                          headers=headers("root", ["admin"])).status_code == 404

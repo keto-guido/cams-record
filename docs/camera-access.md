@@ -37,6 +37,33 @@ Matching is exact and case-sensitive.
 access to every camera whose `id` or `snap` equals it. A name matching no camera is denied. Every
 route that reaches go2rtc or recordings applies this rule, so a client-supplied name is never trusted.
 
+**Configured stream sources (recorder, `CameraAccess.allowed` only).** Recorded footage is
+authorized for the **logical** camera id (cameras.yaml key / registry id). Behavior:
+
+1. Parent id must pass registry `can_stream` (exact id/snap).
+2. Each configured `main_stream` / `sub_stream` keeps every `source_owners` grant via
+   `can_stream(owner)`.
+3. If a source is an **explicit** registered camera id or `snap`, also require `can_stream(src)`
+   exactly — shared/restricted stream auth is not weakened.
+4. If a source is only a cameras.yaml alias (not registered as id/snap), inherit those parent
+   grants. No helper registry row is required. Parent relation comes from the structured
+   `main_stream`/`sub_stream` map, never from stripping a `-main` suffix (so mismatched pairs
+   like `main-st-south` / `main-st-south-main`, and logical camera ids that themselves end in
+   `-main`, work).
+
+Missing cameras.yaml mapping or an unknown camera denies access, including for admins.
+Requesting `cam=<helper>` without a registry row does **not** inherit parent capability.
+`resolve_camera` defaults `main_stream` to the camera id when unset — tests and configs that
+rely on that default miss `main != sub != id` regressions; real cameras.yaml must set both
+streams explicitly when they differ.
+
+Live App Hub routes (`/cams/api/stream/<id>`, snap, list) stay exact id/snap `canStream` /
+`list` — this change does **not** invent unregistered go2rtc stream aliases. HD remains
+`/api/export` and `/api/clip` on the parent id with `quality=main`. Shared
+`apphub/camera_acl_vectors.json` is unchanged. After this backend ships, removing fake helper
+rows from `cams.json` removes the extra live-grid tiles; App Hub code stays the same (pinned
+consumer historically hub `89277156` ↔ record `8e320496`).
+
 **Responses.** Unknown and forbidden cameras give the same 404. The API never returns `users` or
 `roles`; clients see only `{id, name}`.
 
@@ -61,6 +88,15 @@ client-controlled there. It never reads them.
 `list(user)`, `get(user, id)`, `can(user, id)` and `canStream(user, name)`. Without it, `cams.js`
 falls back to `fileAccess()`, which has no roles: open cameras and users named in `users` work, but
 role grants and the admin rule do not. It can under-grant, never over-grant.
+
+Pinned `C.cameras` interface (unchanged App Hub behavior; helpers leave the grid when removed
+from `cams.json`):
+
+| Method | Required behavior |
+| --- | --- |
+| `list(user)` | Visible registry cameras only: `{id, name}`. Do not register go2rtc helper stream names. |
+| `get(user, id)` / `can(user, id)` | Exact registry id. No parent boost for a missing helper id. |
+| `canStream(user, name)` | Exact id/snap owners (shared vectors). Live grid streams the logical camera id. Recorder alias inheritance is cams-record `CameraAccess.allowed` only. |
 
 ## Routes
 
@@ -110,6 +146,6 @@ The registry bind source must be a dedicated directory containing only `cams.jso
 Configure App Hub to write its live registry there; never mount its general data or secrets directory.
 Mount this dedicated directory read-only in cams-record so atomic replacements remain visible.
 
-Recorded footage also checks both configured `main_stream` and `sub_stream` against all registry
-owners by id or snap before querying recordings. Missing mappings and unregistered sources deny
-access, including for admins. Register each raw stream explicitly via its owning camera id or snap.
+Recorded footage uses `CameraAccess.allowed` as above before querying recordings. Explicit
+id/snap sources still require `can_stream(src)`; config-only aliases inherit via `source_owners`
+without fake helper cameras. Missing cameras.yaml mappings still deny, including for admins.
