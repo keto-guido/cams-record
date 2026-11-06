@@ -25,7 +25,10 @@ function parseRegistry(text) {
   try { data = JSON.parse(text); } catch (e) { console.error('cams.json: invalid JSON, no cameras'); return []; }
   if (!Array.isArray(data)) { console.error('cams.json: not an array, no cameras'); return []; }
   const cams = data.map(camera).filter(Boolean), count = {};
-  for (const c of cams) count['$' + c.id] = (count['$' + c.id] || 0) + 1;
+  // Count raw IDs too: a malformed duplicate must invalidate its valid twin.
+  for (const e of data) {
+    if (e && typeof e === 'object' && !Array.isArray(e) && typeof e.id === 'string') count['$' + e.id] = (count['$' + e.id] || 0) + 1;
+  }
   return cams.filter(c => count['$' + c.id] === 1);
 }
 function canAccess(cam, user, roles) {

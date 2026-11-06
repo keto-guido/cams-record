@@ -76,7 +76,8 @@ def parse_registry(text: str) -> dict[str, Camera]:
         log.error("camera registry is not an array, denying all cameras")
         return {}
     cameras = [c for c in map(_camera, data) if c]
-    counts = Counter(c.id for c in cameras)
+    # Count raw IDs before validation: a malformed duplicate must not leave a valid twin open.
+    counts = Counter(e["id"] for e in data if isinstance(e, dict) and isinstance(e.get("id"), str))
     return {c.id: c for c in cameras if counts[c.id] == 1}
 
 
@@ -120,7 +121,14 @@ class CameraRegistry:
 
 
 class CameraAccess:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, cameras=None):
+        # Copy configured raw sources once; registry ACLs remain live on every request.
+        self.sources = {cid: tuple(src for src in (cam.main_stream, cam.sub_stream) if src)
+                        for cid, cam in (cameras or {}).items()}
+        self.source_owners = {}
+        for cid, sources in self.sources.items():
+            for source in sources:
+                self.source_owners.setdefault(source, set()).add(cid)
         self.enforce = cfg["enforce"]
         self.registry = CameraRegistry(cfg["registry_file"])
 
@@ -128,7 +136,12 @@ class CameraAccess:
         if who.claimed_user is not None and who.claimed_user != who.user:
             return False
         cameras = self.registry.current()
-        return camera in cameras and can_stream(cameras, camera, who.user, who.roles)
+        sources = self.sources.get(camera)
+        return (camera in cameras and bool(sources)
+                and can_stream(cameras, camera, who.user, who.roles)
+                and all(can_stream(cameras, src, who.user, who.roles)
+                        and all(can_stream(cameras, owner, who.user, who.roles)
+                                for owner in self.source_owners[src]) for src in sources))
 
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):

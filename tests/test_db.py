@@ -244,14 +244,18 @@ def test_protection_updates_both_qualities_only_overlaps(db):
 
 
 def test_migration_3_upgrades_v2(db):
+    from cams_record.db import MIGRATIONS
+
     db.insert_segment(row())
     db.run(lambda c: c.execute("UPDATE segments SET protected=1"))
     db.run(lambda c: c.execute("ALTER TABLE segments DROP COLUMN protected_until"))
     db.run(lambda c: c.execute("DELETE FROM schema_version WHERE version>=3"))
     db.ready = False
-    assert db.ensure_schema() == 4
+    assert db.ensure_schema() == MIGRATIONS[-1][0]
     values = db.run(lambda c: (c.execute("SELECT protected, protected_until FROM segments"), c.fetchone())[1])
     assert values == (1, None)
+    tables = db.run(lambda c: (c.execute("SHOW TABLES LIKE 'push_subscriptions'"), c.fetchone())[1])
+    assert tables and tables[0] == "push_subscriptions"
 
 
 def legacy_duplicate(db):

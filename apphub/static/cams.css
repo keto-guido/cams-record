@@ -1,6 +1,17 @@
 /* Cameras (/cams/). Tokens: /shared/nav.css, loaded before style.css and this file. Contract: DESIGN.md in keto-guido/apphub.
    style.css styles bare <button>, including :hover, so every custom button below resets both states. */
 
+/* ---------- push notification control ---------- */
+.push-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--mn-space-3);margin:0 0 var(--mn-space-3);padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md)}
+.push-bar[hidden]{display:none}
+.push-copy{min-width:0;flex:1 1 220px}
+.push-title{display:block;font-weight:650}
+.push-copy p{margin:.2em 0 0}
+.push-actions{display:flex;flex-wrap:wrap;gap:var(--mn-space-2)}
+.push-actions .ghost{min-height:var(--mn-tap);padding:0 var(--mn-space-3);border:1px solid var(--mn-border);border-radius:var(--mn-radius-sm);background:transparent;color:inherit}
+.push-actions .ghost:hover{border-color:var(--mn-accent);background:var(--mn-hover)}
+.push-actions .ghost[hidden]{display:none}
+
 /* ---------- grid ---------- */
 .camgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:var(--mn-space-3);margin-top:var(--mn-space-3)}
 button.camtile,button.camtile:hover{position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:2px;min-width:0;padding:0 0 var(--mn-space-3);background:var(--mn-surface-1);color:inherit;border:1px solid var(--mn-border);border-radius:var(--mn-radius-lg);box-shadow:var(--mn-shadow-1);overflow:hidden;font:inherit;text-align:left;white-space:normal;cursor:pointer;transition:border-color .2s}

@@ -84,7 +84,7 @@ go2rtc HLS session ids are not tied to a camera, so `cams.js` records each id's 
 | `access.enforce` | `true` | `ACCESS_ENFORCE` |
 | `access.registry_file` | `/apphub-data/cams.json` | `ACCESS_REGISTRY_FILE` |
 
-Mount the directory holding `cams.json`, not the file: the hub saves by atomic rename, and a
+Mount a dedicated directory containing only `cams.json`, not the file: the hub saves by atomic rename, and a
 single-file bind mount would keep reading the old inode. The container user needs read access.
 
 If the file is missing or unreadable, every camera route returns 404, including for admins.
@@ -95,7 +95,7 @@ If the file is missing or unreadable, every camera route returns 404, including 
 Deploy in this order:
 
 1. App Hub with `C.cameras`, and `apphub/camera_acl.js` next to `cams.js`.
-2. cams-record with `APPHUB_DATA_DIR` set.
+2. cams-record with `APPHUB_CAMERA_REGISTRY_DIR` set.
 3. Add `users` or `roles` to cameras only after `/cams-detect` enforces this contract.
 
 ## Open gap: `/cams-detect`
@@ -105,3 +105,11 @@ App Hub filters it. Until that service enforces this contract, a user can still 
 cameras' data from it. That covers `/api/cameras`, `/api/events`, `/api/events/{id}/snapshot*.jpg`,
 `/api/frame/{id}.jpg` and the `/api/stream` event stream. Snapshots are looked up by event id, so
 that service has to resolve the event's camera before answering.
+
+The registry bind source must be a dedicated directory containing only `cams.json`.
+Configure App Hub to write its live registry there; never mount its general data or secrets directory.
+Mount this dedicated directory read-only in cams-record so atomic replacements remain visible.
+
+Recorded footage also checks both configured `main_stream` and `sub_stream` against all registry
+owners by id or snap before querying recordings. Missing mappings and unregistered sources deny
+access, including for admins. Register each raw stream explicitly via its owning camera id or snap.

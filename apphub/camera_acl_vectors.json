@@ -19,6 +19,10 @@
     {"id": "bad-snap", "name": "Rejected snap", "snap": "rtsp://user:pw@host/x"},
     {"id": "dots-snap", "name": "Rejected snap", "snap": "a..b"},
     {"id": "null-snap", "name": "Rejected snap", "snap": null},
+    {"id": "bad-duplicate", "name": "Valid"},
+    {"id": "bad-duplicate"},
+    {"id": "snap-duplicate", "name": "Valid"},
+    {"id": "snap-duplicate", "name": "Malformed", "snap": null},
     "not an object",
     ["not", "an", "object"],
     null

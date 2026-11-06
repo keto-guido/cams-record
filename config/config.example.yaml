@@ -27,6 +27,8 @@ auth:
   mode: jwt              # jwt | none (none only for local testing)
   secret_file: /run/secrets/apphub_jwt
   app_id: cams-record    # required JWT audience
+  roles: [cams, admin]
+  admin_roles: [admin]
 access:
   enforce: true          # per-camera ACL from App Hub's cams.json; see docs/camera-access.md
   registry_file: /apphub-data/cams.json
@@ -52,3 +54,15 @@ detection_protection:
   post_s: 5
   fallback_s: 10
   max_window_s: 120
+push:
+  enabled: true
+  vapid_private_file: /run/secrets/vapid_private_key
+  # vapid_public_key: ""   # optional; derived from the private key when empty
+  vapid_subject: mailto:cams@localhost   # contact URI shown to push services
+  webhook_secret_file: /run/secrets/push_webhook_secret
+  poll_enabled: true       # send from cams_detect.events poller (no cams-detect change required)
+  interval_s: 15
+  lookback_s: 120
+  # labels: [person, car]  # optional allow-list; empty = all labels
+  ttl_s: 86400
+  timeout_s: 10

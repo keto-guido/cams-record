@@ -20,10 +20,12 @@ services:
       - /volume1/nvr:/volume1/nvr
       - ./config:/config:ro
       # The directory, not cams.json itself: the hub saves by atomic rename, which a file mount would miss.
-      - ${APPHUB_DATA_DIR:?set APPHUB_DATA_DIR to the App Hub directory holding cams.json}:/apphub-data:ro
+      - ${APPHUB_CAMERA_REGISTRY_DIR:?set APPHUB_CAMERA_REGISTRY_DIR to a dedicated directory containing only cams.json}:/apphub-data:ro
     secrets:
       - db_password
       - apphub_jwt
+      - vapid_private_key
+      - push_webhook_secret
     # Synology's kernel lacks CFS quota support, so `cpus:` fails there; use a relative CPU weight.
     cpu_shares: 256
     mem_limit: 512m
@@ -45,3 +47,7 @@ secrets:
     file: ./secrets/db_password    # MariaDB password for user cams_record
   apphub_jwt:
     file: ./secrets/apphub_jwt     # same secret file the App Hub signs tokens with
+  vapid_private_key:
+    file: ./secrets/vapid_private_key   # PEM private key for Web Push VAPID (never commit)
+  push_webhook_secret:
+    file: ./secrets/push_webhook_secret # shared secret for cams-detect → cams-record webhook

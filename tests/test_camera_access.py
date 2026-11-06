@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cams_record.camera_access import CameraRegistry, can_access, can_stream, parse_registry
-from cams_record.config import DEFAULTS, apply_env, deep_merge, validate
+from cams_record.config import DEFAULTS, apply_env, deep_merge, resolve_camera, validate
 from cams_record.web import create_app
 from tests.test_clips import seg
 from tests.test_web import SECRET, tok
@@ -100,7 +100,8 @@ def setup(tmp_path):
     db.segment_rows.return_value = [seg() | {"id": 1}]
     db.clip_segments.return_value = ([seg()], 60)
     db.segment_by_id.return_value = None
-    return db, registry, TestClient(create_app(SimpleNamespace(db=db), cfg))
+    cameras = {c["id"]: resolve_camera(c["id"], {}) for c in REGISTRY}
+    return db, registry, TestClient(create_app(SimpleNamespace(db=db, cameras=cameras), cfg))
 
 
 def touched(db):
@@ -132,7 +133,10 @@ def test_every_camera_route_is_covered(setup):
     """Fails when a new route takes a camera without being added to CAMERA_ROUTES."""
     _, _, client = setup
     found = mounted_paths(client.app.app.routes)
-    camera_free = {"/cams-record/healthz", "/cams-record/api/status", "/cams-record/api/metrics"}
+    camera_free = {"/cams-record/healthz", "/cams-record/api/status", "/cams-record/api/metrics",
+                   "/cams-record/api/push/vapid-public-key", "/cams-record/api/push/status",
+                   "/cams-record/api/push/subscribe", "/cams-record/api/push/test",
+                   "/cams-record/api/push/event-context/{event_id}", "/cams-record/api/internal/detection-event"}
     covered = {"/cams-record" + u.split("?")[0].replace("{c}", "{cam}").replace("seg/1.ts", "seg/{segment_id}.ts")
                for u in CAMERA_ROUTES}
     assert found == covered | camera_free
@@ -162,10 +166,20 @@ def test_grants(setup, cam, user, roles, status):
     assert client.get(f"/api/timeline?cam={cam}&start=0&end=60", headers=headers(user, roles)).status_code == status
 
 
-def test_foreign_segment_id_is_refused(setup):
+def test_foreign_segment_id_is_refused(setup, monkeypatch):
     db, _, client = setup
     db.segment_by_id.return_value = seg() | {"id": 1, "camera_id": "private", "quality": "sub"}
     assert client.get("/api/hls/open/seg/1.ts?o=0", headers=headers()).status_code == 404
+    # Keep the actual DB ownership check and media path resolution; stub only ffmpeg.
+    db.segment_by_id.return_value = seg() | {"id": 1, "camera_id": "open", "quality": "sub"}
+
+    def remux(cmd, timeout):
+        Path(cmd[-1]).write_bytes(b"transport stream")
+        return True
+    monkeypatch.setattr(client.app.app.state.media, "run", remux)
+    response = client.get("/api/hls/open/seg/1.ts?o=0", headers=headers())
+    assert response.status_code == 200
+    assert response.content == b"transport stream"
 
 
 def test_identity_comes_from_the_jwt_not_headers(setup):
@@ -196,3 +210,52 @@ def test_missing_registry_denies_even_admin(setup):
 def test_bad_id_is_rejected_before_lookup(setup):
     _, _, client = setup
     assert client.get("/api/timeline?cam=../etc&start=0&end=60", headers=headers()).status_code == 400
+
+
+@pytest.mark.parametrize("name", ["ACCESS_ENFORCE", "PUSH_ENABLED", "PUSH_POLL_ENABLED",
+                                  "DETECTION_PROTECTION_ENABLED"])
+@pytest.mark.parametrize("value", ["treu", "false-ish", "2", " "])
+def test_invalid_boolean_env_fails(name, value):
+    with pytest.raises(ValueError, match=name):
+        apply_env(deep_merge(DEFAULTS, None), {name: value})
+
+
+@pytest.mark.parametrize("quality", ["main_stream", "sub_stream"])
+@pytest.mark.parametrize("source,user,allowed", [("private", "bob", False), ("private", "ann", True),
+                                               ("unknown", "root", False), ("shared-raw", "bob", False),
+                                               ("shared-raw", "ann", True)])
+def test_configured_sources_are_checked_before_database(tmp_path, quality, source, user, allowed):
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY + [
+        {"id": "shared-private", "name": "Restricted alias", "snap": "shared-raw", "users": ["ann"]}]))
+    secret = tmp_path / "secret"
+    secret.write_text(SECRET)
+    cfg = deep_merge(DEFAULTS, {"auth": {"secret_file": str(secret)},
+                                "access": {"registry_file": str(registry)},
+                                "recording": {"state_dir": str(tmp_path / "state")}})
+    cameras = {"open": resolve_camera("open", {"main_stream": "open", quality: source})}
+    db = Mock()
+    db.segment_rows.return_value = []
+    client = TestClient(create_app(SimpleNamespace(db=db, cameras=cameras), cfg))
+    roles = ("admin",) if user == "root" else ("cams",)
+    response = client.get("/api/timeline?cam=open&start=0&end=60", headers=headers(user, roles))
+    assert response.status_code == (200 if allowed else 404)
+    assert touched(db) is allowed
+
+
+def test_missing_source_mapping_denies_even_admin(tmp_path):
+    from cams_record.camera_access import CameraAccess, Viewer
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY))
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, {})
+    assert not access.allowed("open", Viewer("root", ("admin",)))
+
+
+@pytest.mark.parametrize("user,allowed", [("bob", False), ("ann", True)])
+def test_configured_shared_source_requires_all_camera_owners(tmp_path, user, allowed):
+    from cams_record.camera_access import CameraAccess, Viewer
+    registry = tmp_path / "cams.json"
+    registry.write_text(json.dumps(REGISTRY))
+    cameras = {cid: resolve_camera(cid, {"main_stream": "open"}) for cid in ("open", "private")}
+    access = CameraAccess({"enforce": True, "registry_file": str(registry)}, cameras)
+    assert access.allowed("open", Viewer(user, ("cams",))) is allowed

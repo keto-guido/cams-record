@@ -78,6 +78,9 @@ function get(user, url, headers) {
 }
 
 (async () => {
+  for (const url of ['/cams/', '/cams/api/list', '/cams/sw.js', '/cams/manifest.webmanifest', '/cams/static/icon-192.png']) {
+    assert.deepEqual(await get('', url, { 'x-apphub-user': 'ann' }), NF);
+  }
   assert(!(await get('bob', '/cams/')).body.includes('Locked Room'));
   assert((await get('ann', '/cams/')).body.includes('Locked Room'));
   assert.deepEqual(JSON.parse((await get('bob', '/cams/api/list')).body), [{ id: 'open', name: 'Open' }, { id: 'open2', name: 'Open2' }]);

@@ -13,6 +13,7 @@ from .db import Database, DBUnavailable
 from .diskguard import CHECK_INTERVAL, LEVEL_OK, DiskGuard
 from .indexer import Indexer
 from .protection import DetectionProtection
+from .push import PushNotifier, PushService
 from .reconcile import reconcile
 from .recorder import StreamRecorder
 from .retention import Janitor
@@ -37,6 +38,8 @@ class Service:
                 self.recorders[rec.key] = rec
         self.janitor = Janitor(db, self.root, cfg["retention"], int(self.rec_cfg["segment_time"]))
         self.protection = DetectionProtection(db, cfg["detection_protection"])
+        self.push = PushService(db, cfg.get("push") or {})
+        self.push_notifier = PushNotifier(self.push, db, cfg.get("push") or {})
         self._guard_seen = LEVEL_OK
         self.started_at = time.time()
         self.reconcile_result: dict | None = None
@@ -48,6 +51,7 @@ class Service:
         self.started_at = time.time()
         self.indexer.start()
         self.protection.start()
+        self.push_notifier.start()
         self.guard.check(startup=True)  # before any recorder starts: refuse them below the minimum
         for rec in self.recorders.values():
             rec.start()
@@ -55,6 +59,9 @@ class Service:
         self._guard_thread.start()
         log.info("cams-record %s: %d streams on %d cameras -> %s", __version__, len(self.recorders),
                  sum(1 for c in self.cameras.values() if c.streams()), self.root)
+        if self.push.enabled:
+            log.info("web push: enabled (poll=%s)",
+                     bool((self.cfg.get("push") or {}).get("poll_enabled", True)))
         if self.db is not None:
             self.janitor.start()
             self._bg = threading.Thread(target=self._startup_db, args=(run_reconcile,), name="startup-db",
@@ -97,6 +104,7 @@ class Service:
         if self._guard_thread is not None:
             self._guard_thread.join(timeout=5)
         self.protection.stop()
+        self.push_notifier.stop()
         self.janitor.stop()
         for rec in self.recorders.values():
             rec.stop()

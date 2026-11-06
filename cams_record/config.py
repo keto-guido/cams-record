@@ -74,12 +74,26 @@ DEFAULTS: dict[str, Any] = {
         "mode": "jwt",  # jwt | none
         "secret_file": "/run/secrets/apphub_jwt",
         "header": "x-apphub-token",
-        "roles": ["admin"],  # legacy setting; non-clip API routes always require admin
+        "roles": ["cams", "admin"],
+        "admin_roles": ["admin"],
         "leeway_seconds": 30,
     },
     "access": {
         "enforce": True,  # false turns off per-camera checks (docs/camera-access.md)
         "registry_file": "/apphub-data/cams.json",  # App Hub's registry; bind its directory, not the file
+    },
+    "push": {
+        "enabled": True,  # still inactive until vapid_private_file is present
+        "vapid_private_file": "/run/secrets/vapid_private_key",
+        "vapid_public_key": "",  # optional override; otherwise derived from the private key
+        "vapid_subject": "mailto:cams@localhost",  # contact URI required by VAPID
+        "webhook_secret_file": "/run/secrets/push_webhook_secret",
+        "poll_enabled": True,  # also send from the cams_detect.events poller
+        "interval_s": 15,
+        "lookback_s": 120,
+        "labels": [],  # empty = all labels; e.g. [person, car]
+        "ttl_s": 86400,
+        "timeout_s": 10,
     },
     "db": {
         "host": "127.0.0.1",
@@ -120,6 +134,14 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DB_NAME": (("db", "database"), str),
     "DB_USER": (("db", "user"), str),
     "DB_PASSWORD_FILE": (("db", "password_file"), str),
+    "PUSH_ENABLED": (("push", "enabled"), bool),
+    "PUSH_VAPID_PRIVATE_FILE": (("push", "vapid_private_file"), str),
+    "PUSH_VAPID_PUBLIC_KEY": (("push", "vapid_public_key"), str),
+    "PUSH_VAPID_SUBJECT": (("push", "vapid_subject"), str),
+    "PUSH_WEBHOOK_SECRET_FILE": (("push", "webhook_secret_file"), str),
+    "PUSH_POLL_ENABLED": (("push", "poll_enabled"), bool),
+    "PUSH_INTERVAL_S": (("push", "interval_s"), float),
+    "PUSH_LOOKBACK_S": (("push", "lookback_s"), float),
 }
 
 
@@ -135,7 +157,12 @@ def deep_merge(base: dict, override: dict | None) -> dict:
 
 def _parse_env(value: str, typ: type):
     if typ is bool:
-        return value.strip().lower() in ("1", "true", "yes", "on")
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        raise ValueError("must be a recognized boolean")
     if typ is list:
         return [v.strip() for v in value.split(",") if v.strip()]
     return typ(value)
@@ -149,7 +176,9 @@ def apply_env(cfg: dict, env: dict | None = None) -> dict:
             continue
         try:
             val = _parse_env(raw, typ)
-        except ValueError:
+        except ValueError as exc:
+            if typ is bool:
+                raise ValueError(f"{name} must be a recognized boolean") from exc
             log.warning("ignoring invalid env %s=%r", name, raw)
             continue
         node = cfg
@@ -308,6 +337,20 @@ def validate(cfg: dict) -> dict:
             raise ValueError(f"detection_protection.{key} must be >= 0")
     if not isinstance(cfg["detection_protection"]["enabled"], bool):
         raise ValueError("detection_protection.enabled must be true or false")
+    push = cfg.setdefault("push", {})
+    for key in ("enabled", "poll_enabled"):
+        if key in push and not isinstance(push[key], bool):
+            raise ValueError(f"push.{key} must be true or false")
+    for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s"):
+        if key in push:
+            _positive(f"push.{key}", push[key])
+    labels = push.get("labels") or []
+    if not isinstance(labels, list) or any(not isinstance(x, str) or not x for x in labels):
+        raise ValueError("push.labels must be a list of non-empty strings")
+    push["labels"] = [str(x) for x in labels]
+    subject = str(push.get("vapid_subject") or "").strip()
+    if subject and not (subject.startswith("mailto:") or subject.startswith("https://")):
+        raise ValueError("push.vapid_subject must be a mailto: or https: URI")
     _validate_retention(cfg["retention"])
     return cfg
 
