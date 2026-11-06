@@ -54,6 +54,8 @@ jobs:
           conn = pymysql.connect(host="127.0.0.1", user="root", password="rootpw", autocommit=True)
           with conn.cursor() as cur:
               cur.execute("GRANT ALL ON cams_detect.* TO 'cams_record'@'%'")
+              cur.execute("CREATE DATABASE IF NOT EXISTS cams_config_test")
+              cur.execute("GRANT ALL ON cams_config_test.* TO 'cams_record'@'%'")
           conn.close()
           PY
       - name: Unit tests (MariaDB-backed)

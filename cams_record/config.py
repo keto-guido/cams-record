@@ -108,6 +108,15 @@ DEFAULTS: dict[str, Any] = {
         "password_file": "/run/secrets/db_password",
         "connect_timeout": 5,
     },
+    # Camera objects (docs/camera-model.md). Only `python -m cams_record.camconfig` uses this so far.
+    "cams_config": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "cams_config",
+        "user": "cams_record",
+        "password_file": "/run/secrets/db_password",
+        "connect_timeout": 5,
+    },
 }
 
 # env var -> (path in config, type)
@@ -139,6 +148,11 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DB_NAME": (("db", "database"), str),
     "DB_USER": (("db", "user"), str),
     "DB_PASSWORD_FILE": (("db", "password_file"), str),
+    "CAMS_CONFIG_DB_HOST": (("cams_config", "host"), str),
+    "CAMS_CONFIG_DB_PORT": (("cams_config", "port"), int),
+    "CAMS_CONFIG_DB_NAME": (("cams_config", "database"), str),
+    "CAMS_CONFIG_DB_USER": (("cams_config", "user"), str),
+    "CAMS_CONFIG_DB_PASSWORD_FILE": (("cams_config", "password_file"), str),
     "PUSH_ENABLED": (("push", "enabled"), bool),
     "PUSH_VAPID_PRIVATE_FILE": (("push", "vapid_private_file"), str),
     "PUSH_VAPID_PUBLIC_KEY": (("push", "vapid_public_key"), str),

@@ -128,11 +128,12 @@ TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions
 
 
 class Database:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, migrations: list[tuple[int, list[str]]] | None = None):
         import pymysql
 
         self.pymysql = pymysql
         self.cfg = cfg
+        self.migrations = MIGRATIONS if migrations is None else migrations
         self.password = cfg.get("password")
         if self.password is None:
             self.password = read_secret(cfg.get("password_file")) or ""
@@ -190,7 +191,7 @@ class Database:
                         "applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)) ENGINE=InnoDB")
             cur.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version")
             current = int(cur.fetchone()[0])
-            for version, stmts in MIGRATIONS:
+            for version, stmts in self.migrations:
                 if version <= current:
                     continue
                 for stmt in stmts:
