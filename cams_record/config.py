@@ -37,6 +37,9 @@ QUALITIES = ("main", "sub")
 DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "base_path": "/cams-record",
+    # Where cameras come from (docs/camera-model.md): file = cameras.yaml (default); shadow = cameras.yaml,
+    # while also reading cams_config and reporting every difference; db = cams_config.
+    "camera_source": "file",
     "http": {"host": "127.0.0.1", "port": 8097},
     "go2rtc": {"rtsp_url": "rtsp://127.0.0.1:8554/{stream}"},
     "recording": {
@@ -83,6 +86,9 @@ DEFAULTS: dict[str, Any] = {
     "access": {
         "enforce": True,  # false turns off per-camera checks (docs/camera-access.md)
         "registry_file": "/apphub-data/cams.json",  # App Hub's registry; bind its directory, not the file
+        # camera_source db only: write registry_file from cams_config on every change. The registry
+        # directory must then be mounted read-write for cams-record (and stay read-only elsewhere).
+        "publish_registry": False,
     },
     "push": {
         "enabled": True,  # still inactive until vapid_private_file is present
@@ -116,6 +122,8 @@ DEFAULTS: dict[str, Any] = {
         "user": "cams_record",
         "password_file": "/run/secrets/db_password",
         "connect_timeout": 5,
+        "poll_s": 5,  # how often the revision is checked
+        "cache_file": "",  # last good camera objects; default recording.state_dir/cams_config.json
     },
 }
 
@@ -130,6 +138,8 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DETECTION_PROTECTION_ENABLED": (("detection_protection", "enabled"), bool),
     "DETECTION_PROTECTION_INTERVAL_S": (("detection_protection", "interval_s"), float),
     "DETECTION_PROTECTION_DAYS": (("detection_protection", "days"), float),
+    "CAMERA_SOURCE": (("camera_source",), str),
+    "ACCESS_PUBLISH_REGISTRY": (("access", "publish_registry"), bool),
     "AUTH_APP_ID": (("auth", "app_id"), str),
     "ACCESS_ENFORCE": (("access", "enforce"), bool),
     "ACCESS_REGISTRY_FILE": (("access", "registry_file"), str),
@@ -351,6 +361,19 @@ def validate(cfg: dict) -> dict:
         raise ValueError("access.enforce must be true or false")
     if cfg["access"]["enforce"] and not cfg["access"]["registry_file"]:
         raise ValueError("access.registry_file is required while access.enforce is true")
+    if cfg["camera_source"] not in ("file", "shadow", "db"):
+        raise ValueError("camera_source must be file, shadow or db")
+    if not isinstance(cfg["access"].get("publish_registry", False), bool):
+        raise ValueError("access.publish_registry must be true or false")
+    if cfg["access"].get("publish_registry"):
+        if cfg["camera_source"] != "db":
+            raise ValueError("access.publish_registry needs camera_source: db")
+        if not cfg["access"]["registry_file"]:
+            raise ValueError("access.publish_registry needs access.registry_file")
+    cc = cfg["cams_config"]
+    _positive("cams_config.poll_s", cc["poll_s"])
+    if not cc.get("cache_file"):
+        cc["cache_file"] = str(Path(cfg["recording"]["state_dir"]) / "cams_config.json")
     rec = cfg["recording"]
     if int(rec["segment_time"]) < 2:
         raise ValueError("recording.segment_time must be >= 2 seconds")

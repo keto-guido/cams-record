@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 import yaml
+from conftest import CFG_DB
 
 from cams_record.camconfig.importer import build_plan, check_plan, check_registry
 from cams_record.camconfig.model import CameraObject, Stream
@@ -16,15 +16,6 @@ from cams_record.camera_access import can_access, can_stream, parse_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = json.loads((ROOT / "apphub" / "camera_acl_vectors.json").read_text())
-
-CFG_DB = {
-    "host": os.environ.get("CAMS_TEST_DB_HOST", "127.0.0.1"),
-    "port": int(os.environ.get("CAMS_TEST_DB_PORT", "3306")),
-    "user": os.environ.get("CAMS_TEST_DB_USER", "cams_record"),
-    "password": os.environ.get("CAMS_TEST_DB_PASSWORD", "cams_record"),
-    "database": os.environ.get("CAMS_TEST_CONFIG_DB_NAME", "cams_config_test"),
-    "connect_timeout": 2,
-}
 
 DETECT = {"cameras": {
     "front-door": {"name": "Front Door", "stream": "front-door", "main_stream": "front-door-main",
@@ -201,37 +192,6 @@ def test_shared_vectors_survive_import_and_export():
 
 
 # ---- store (MariaDB) --------------------------------------------------------------------
-
-def _config_db_unavailable() -> str | None:
-    try:
-        import pymysql
-
-        pymysql.connect(**CFG_DB).close()
-    except Exception as exc:  # noqa: BLE001
-        return f"MariaDB {CFG_DB['database']} not reachable ({exc.__class__.__name__})"
-    return None
-
-
-@pytest.fixture
-def store():
-    reason = _config_db_unavailable()
-    if reason:
-        pytest.skip(reason)
-    import pymysql
-
-    from cams_record.camconfig.schema import TABLES
-    from cams_record.camconfig.store import CamConfigStore, open_db
-
-    conn = pymysql.connect(**CFG_DB, autocommit=True)
-    with conn.cursor() as cur:
-        for t in TABLES:
-            cur.execute(f"DROP TABLE IF EXISTS {t}")
-    conn.close()
-    db = open_db(CFG_DB)
-    db.ensure_schema()
-    yield CamConfigStore(db)
-    db.close()
-
 
 def test_store_round_trip(store):
     plan, _ = _plan(record_cfg={"retention": {"cameras": {"front-door": {"main_days": 7, "sub_days": 30}}}})

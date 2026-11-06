@@ -167,3 +167,18 @@ class CameraObject:
             "detection": copy.deepcopy(self.detection), "recording": copy.deepcopy(self.recording),
             "notify": copy.deepcopy(self.notify),
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> CameraObject:
+        """Inverse of to_dict (used for the local last-good cache)."""
+        return cls(
+            id=d["id"], name=d["name"], enabled=bool(d.get("enabled", True)),
+            connector_type=d.get("connector_type", "go2rtc"), connector=copy.deepcopy(d.get("connector") or {}),
+            visibility=d.get("visibility", "restricted"), users=tuple(d.get("users") or ()),
+            roles=tuple(d.get("roles") or ()), sort_order=int(d.get("sort_order", 0)),
+            streams={k: Stream(k, s["go2rtc_name"], s.get("width"), s.get("height"), s.get("codec"), s.get("fps"))
+                     for k, s in (d.get("streams") or {}).items()},
+            use={p: tuple(k) for p, k in (d.get("use") or {}).items()},
+            detection=copy.deepcopy(d.get("detection")), recording=copy.deepcopy(d.get("recording")),
+            notify=copy.deepcopy(d.get("notify") or []),
+        )

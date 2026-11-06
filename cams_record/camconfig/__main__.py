@@ -2,6 +2,7 @@
 
   python -m cams_record.camconfig import --detect D --record R --registry J [--record-config C] [--apply]
   python -m cams_record.camconfig export-registry [--out FILE]
+  python -m cams_record.camconfig export-files [--record-out F] [--detect-out F] [--force]
   python -m cams_record.camconfig show [ID]
 
 Database settings come from --config-dir/config.yaml (section cams_config) and CAMS_CONFIG_DB_* env.
@@ -16,15 +17,15 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
 
 from ..config import DEFAULTS, _read_yaml, apply_env, deep_merge
 from .importer import build_plan, check_plan
+from .publish import atomic_write, registry_text
 from .store import CamConfigStore, open_db
-from .views import registry
+from .views import detect_camera, record_camera
 
 
 def _db_cfg(config_dir: str | None) -> dict:
@@ -78,21 +79,44 @@ def cmd_import(args) -> int:
 def cmd_export(args) -> int:
     store = CamConfigStore(open_db(_db_cfg(args.config_dir)))
     rev, cams = store.load_all()
-    text = json.dumps(registry(cams), indent=2) + "\n"
+    text = registry_text(cams)
     if not args.out:
         sys.stdout.write(text)
         return 0
-    out = Path(args.out)
-    fd, tmp = tempfile.mkstemp(dir=str(out.parent), prefix=".cams.", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, out)  # atomic rename: readers watch the inode (docs/camera-access.md)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    print(f"wrote {len(cams)} cameras from revision {rev} to {out}", file=sys.stderr)
+    atomic_write(Path(args.out), text)  # readers watch the inode (docs/camera-access.md)
+    print(f"wrote {len(cams)} cameras from revision {rev} to {args.out}", file=sys.stderr)
+    return 0
+
+
+def cmd_export_files(args) -> int:
+    """cameras.yaml for cams-record and cams-detect from cams_config: the rollback path to camera_source file."""
+    store = CamConfigStore(open_db(_db_cfg(args.config_dir)))
+    rev, cams = store.load_all()
+    record, detect, retention = {}, {}, {}
+    for cid, cam in cams.items():
+        rc = record_camera(cam)
+        record[cid] = {"main_stream": rc.main_stream, "sub_stream": rc.sub_stream, "enabled": rc.enabled,
+                       "record_main": rc.record_main, "record_sub": rc.record_sub}
+        if rc.sub_stream is None:
+            del record[cid]["sub_stream"]
+        d = detect_camera(cam)
+        if d is not None:
+            detect[cid] = d
+        if cam.recording:
+            retention[cid] = dict(cam.recording)
+    header = f"# Exported from cams_config revision {rev}. Comments from the original file are not kept.\n"
+    for out, data in ((args.record_out, {"cameras": record}), (args.detect_out, {"cameras": detect})):
+        if not out:
+            continue
+        path = Path(out)
+        if path.exists() and not args.force:
+            print(f"{path} exists; add --force to replace it", file=sys.stderr)
+            return 2
+        atomic_write(path, header + yaml.safe_dump(data, sort_keys=False, default_flow_style=None, width=120))
+        print(f"wrote {path}", file=sys.stderr)
+    if retention:
+        print("# cams-record config.yaml: retention.cameras")
+        sys.stdout.write(yaml.safe_dump({"retention": {"cameras": retention}}, sort_keys=True))
     return 0
 
 
@@ -124,10 +148,15 @@ def main(argv=None) -> int:
     i.add_argument("-v", "--verbose", action="store_true", help="print the planned camera objects")
     e = sub.add_parser("export-registry", help="write cams.json from cams_config")
     e.add_argument("--out")
+    f = sub.add_parser("export-files", help="write cameras.yaml files from cams_config (rollback to files)")
+    f.add_argument("--record-out", help="path for cams-record cameras.yaml")
+    f.add_argument("--detect-out", help="path for cams-detect cameras.yaml")
+    f.add_argument("--force", action="store_true", help="replace existing files")
     s = sub.add_parser("show", help="print camera objects")
     s.add_argument("id", nargs="?")
     args = p.parse_args(argv)
-    return {"import": cmd_import, "export-registry": cmd_export, "show": cmd_show}[args.cmd](args)
+    return {"import": cmd_import, "export-registry": cmd_export, "export-files": cmd_export_files,
+            "show": cmd_show}[args.cmd](args)
 
 
 if __name__ == "__main__":
