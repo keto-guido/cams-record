@@ -91,7 +91,9 @@ def create_app(service, cfg: dict):
         if not got or got != secret:
             raise HTTPException(401, "invalid webhook secret")
 
-    access = CameraAccess(cfg["access"], getattr(service, "cameras", {}))
+    access = getattr(service, "access", None) or CameraAccess(cfg["access"], getattr(service, "cameras", {}))
+    if getattr(push, "access", None) is None:
+        push.access = access
 
     def viewer(request: Request) -> Viewer:
         # Identity is the signed JWT; the hub's x-apphub-user header must only agree with it.
@@ -278,6 +280,8 @@ def create_app(service, cfg: dict):
 
     @r.get("/api/push/status")
     def push_status(endpoint: str | None = None, user: Principal = Depends(clip_user)):
+        # The app asks for status on every open: keep the roles used to filter alerts current.
+        push.refresh_roles(user.sub, user.roles)
         return push.status_for(user.sub, endpoint)
 
     @r.post("/api/push/subscribe")
@@ -290,7 +294,7 @@ def create_app(service, cfg: dict):
             body = dict(body)
             body["user_agent"] = (request.headers.get("user-agent") or "")[:512]
         try:
-            return push.upsert(user.sub, body if isinstance(body, dict) else {})
+            return push.upsert(user.sub, body if isinstance(body, dict) else {}, roles=user.roles)
         except PushError as exc:
             raise HTTPException(exc.status, exc.detail) from exc
 

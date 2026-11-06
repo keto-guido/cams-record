@@ -64,5 +64,6 @@ push:
   interval_s: 15
   lookback_s: 120
   # labels: [person, car]  # optional allow-list; empty = all labels
+  roles_max_age_days: 30   # alerts follow per-camera access; roles saved with a subscription expire after this
   ttl_s: 86400
   timeout_s: 10

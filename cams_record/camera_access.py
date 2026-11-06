@@ -164,6 +164,19 @@ class CameraAccess:
                     return False
         return True
 
+    def registered(self, camera: str) -> bool:
+        return camera in self.registry.current()
+
+    def can_view_camera(self, camera: str, who: Viewer) -> bool:
+        """Registry decision for one camera id, without recordings: used for detection alerts.
+
+        Same rule as a stream name: every registry entry whose id or snap equals ``camera`` must allow
+        the viewer. Unregistered cameras and an unusable registry deny everyone, admins included.
+        """
+        if who.claimed_user is not None and who.claimed_user != who.user:
+            return False
+        return can_stream(self.registry.current(), camera, who.user, who.roles)
+
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):
             raise ClipError(404, "camera not found")

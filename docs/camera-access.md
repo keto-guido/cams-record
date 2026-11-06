@@ -107,6 +107,7 @@ from `cams.json`):
 | `/cams/api/stream/{id}/*` | Camera and stream; `hls/*` also needs a session id issued for this camera |
 | `/cams-record/api/timeline`, `playback`, `hls/{cam}/*`, `export`, `export/info`, `clip`, `clip/info` | Camera id, before any database or file access |
 | `/cams-record/api/hls/{cam}/seg/{id}.ts` | As above; the segment must also belong to `{cam}` |
+| Detection push alerts (poller and webhook) | Camera id, per subscriber, with the roles saved from their last verified JWT; see `docs/web-push.md` |
 
 go2rtc HLS session ids are not tied to a camera, so `cams.js` records each id's camera when it serves
 `index.m3u8`, and refuses that id for any other camera.

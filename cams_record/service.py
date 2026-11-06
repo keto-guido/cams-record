@@ -8,6 +8,7 @@ import threading
 import time
 
 from . import __version__
+from .camera_access import CameraAccess
 from .config import CameraConfig, stream_url
 from .db import Database, DBUnavailable
 from .diskguard import CHECK_INTERVAL, LEVEL_OK, DiskGuard
@@ -38,7 +39,9 @@ class Service:
                 self.recorders[rec.key] = rec
         self.janitor = Janitor(db, self.root, cfg["retention"], int(self.rec_cfg["segment_time"]))
         self.protection = DetectionProtection(db, cfg["detection_protection"])
-        self.push = PushService(db, cfg.get("push") or {})
+        # One registry reader shared by the HTTP routes and detection pushes.
+        self.access = CameraAccess(cfg["access"], cameras)
+        self.push = PushService(db, cfg.get("push") or {}, access=self.access)
         self.push_notifier = PushNotifier(self.push, db, cfg.get("push") or {})
         self._guard_seen = LEVEL_OK
         self.started_at = time.time()

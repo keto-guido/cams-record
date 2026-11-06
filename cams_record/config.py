@@ -92,6 +92,9 @@ DEFAULTS: dict[str, Any] = {
         "interval_s": 15,
         "lookback_s": 120,
         "labels": [],  # empty = all labels; e.g. [person, car]
+        # Roles saved with a subscription (refreshed whenever the app opens) stop counting after this;
+        # the subscriber then only gets alerts for open cameras and cameras that name them.
+        "roles_max_age_days": 30,
         "ttl_s": 86400,
         "timeout_s": 10,
     },
@@ -341,7 +344,7 @@ def validate(cfg: dict) -> dict:
     for key in ("enabled", "poll_enabled"):
         if key in push and not isinstance(push[key], bool):
             raise ValueError(f"push.{key} must be true or false")
-    for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s"):
+    for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s", "roles_max_age_days"):
         if key in push:
             _positive(f"push.{key}", push[key])
     labels = push.get("labels") or []
