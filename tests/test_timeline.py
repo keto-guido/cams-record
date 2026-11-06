@@ -211,6 +211,55 @@ def test_export_limits_fallback_cleanup_busy(setup, monkeypatch):
         media.export_slot.release()
 
 
+def test_export_metadata_and_errors_are_private_no_store(setup, monkeypatch):
+    """Export info and export error JSON must match the media download Cache-Control."""
+    cfg, db, client = setup
+    db.segment_rows.return_value = [rows()[0]]
+    db.clip_segments.side_effect = lambda cam, quality, start, end: (
+        ([seg(deleted_at=True)], 60) if quality == 'main' else ([seg()], 60))
+
+    def run(self, command, timeout):
+        Path(command[-1]).write_bytes(b'export')
+        return True
+
+    monkeypatch.setattr(Media, 'run', run)
+
+    info = client.get('/api/export/info?cam=cam&start=10&end=40', headers=HEADERS)
+    assert info.status_code == 200
+    assert info.headers['cache-control'] == 'private, no-store'
+    assert info.json()['recommended'] == 'sub'
+
+    too_long = client.get('/api/export/info?cam=cam&start=0&end=1801', headers=HEADERS)
+    assert too_long.status_code == 400
+    assert too_long.headers['cache-control'] == 'private, no-store'
+
+    media = client.app.app.state.media
+    media.export_slot.acquire()
+    try:
+        busy_info = client.get('/api/export/info?cam=cam&start=10&end=40', headers=HEADERS)
+        assert busy_info.status_code == 200
+        assert busy_info.json()['busy']
+        assert busy_info.headers['cache-control'] == 'private, no-store'
+        busy = client.get('/api/export?cam=cam&start=10&end=40', headers=HEADERS)
+        assert busy.status_code == 429
+        assert busy.headers['cache-control'] == 'private, no-store'
+        assert busy.headers['retry-after'] == '15'
+    finally:
+        media.export_slot.release()
+
+    db.clip_segments.side_effect = None
+    db.clip_segments.return_value = ([], None)
+    not_ready = client.get('/api/export?cam=cam&start=0&end=1800', headers=HEADERS)
+    assert not_ready.status_code == 425
+    assert not_ready.headers['cache-control'] == 'private, no-store'
+    assert not_ready.headers['retry-after'] == '10'
+
+    db.clip_segments.return_value = ([seg(deleted_at=True)], 60)
+    gone = client.get('/api/export?cam=cam&start=10&end=40&fallback=0', headers=HEADERS)
+    assert gone.status_code == 404
+    assert gone.headers['cache-control'] == 'private, no-store'
+
+
 def test_playback_limits_and_export_not_ready(setup):
     cfg, db, client = setup
     db.segment_rows.return_value = []

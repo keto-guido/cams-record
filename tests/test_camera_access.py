@@ -14,7 +14,7 @@ from cams_record.camera_access import CameraRegistry, can_access, can_stream, pa
 from cams_record.config import DEFAULTS, apply_env, deep_merge, resolve_camera, validate
 from cams_record.web import create_app
 from tests.test_clips import seg
-from tests.test_web import SECRET, tok
+from tests.test_web import SECRET, claim_tok, tok
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = json.loads((ROOT / "apphub" / "camera_acl_vectors.json").read_text(encoding="utf-8"))
@@ -191,6 +191,67 @@ def test_identity_comes_from_the_jwt_not_headers(setup):
     assert client.get(url, headers=headers() | {"x-apphub-roles": "admin,family"}).status_code == 404
     family = url.replace("private", "family")
     assert client.get(family, headers=headers() | {"x-apphub-roles": "family"}).status_code == 404
+
+
+@pytest.mark.parametrize("claims", [
+    {"roles": ["admin"]},  # missing sub
+    {"sub": "", "roles": ["admin"]},
+    {"sub": "   ", "roles": ["admin"]},
+    {"sub": None, "roles": ["admin"]},
+    {"sub": 0, "roles": ["admin"]},
+    {"sub": "root", "roles": [""]},
+    {"sub": "root", "roles": {"admin": True}},
+])
+@pytest.mark.parametrize("route", [
+    "/api/timeline?cam=open&start=0&end=60",
+    "/api/timeline?cam=private&start=0&end=60",
+    "/api/clip/info?camera=open&start=0&end=60",
+    "/api/export/info?cam=open&start=0&end=60",
+    "/api/push/event-context/event-123",
+    "/api/push/status",
+    "/api/status",
+])
+def test_empty_or_invalid_jwt_principal_is_rejected(setup, claims, route):
+    """Correctly signed tokens with blank/non-string sub or bad roles fail closed at auth."""
+    db, _, client = setup
+    db.detection_event_by_id.return_value = {
+        "id": "event-123", "camera_id": "private", "label": "person", "score": 0.9,
+        "start_ts": 10, "end_ts": 20,
+    }
+    response = client.get(route, headers={"x-apphub-token": claim_tok(claims)})
+    assert response.status_code == 401
+    assert not touched(db)
+    assert db.detection_event_by_id.called is False
+
+
+def test_empty_sub_admin_cannot_expose_registered_cameras(setup):
+    """Regression: verify_token used to coerce missing/empty sub to '?', bypassing empty-user ACL."""
+    db, _, client = setup
+    # A real non-blank admin still reaches open and private cameras.
+    assert client.get("/api/timeline?cam=open&start=0&end=60",
+                      headers=headers("root", ["admin"])).status_code == 200
+    assert client.get("/api/timeline?cam=private&start=0&end=60",
+                      headers=headers("root", ["admin"])).status_code == 200
+    db.reset_mock()
+    for claims in ({"sub": "", "roles": ["admin"]}, {"sub": "  \t", "roles": ["admin"]},
+                   {"sub": None, "roles": ["admin"]}, {"roles": ["admin"]},
+                   {"sub": 123, "roles": ["admin"]}):
+        token = claim_tok(claims)
+        for cam in ("open", "private", "family"):
+            response = client.get(f"/api/timeline?cam={cam}&start=0&end=60",
+                                  headers={"x-apphub-token": token})
+            assert response.status_code == 401, (claims, cam, response.status_code)
+            # Same for clip/export metadata and push event deep-links.
+            assert client.get(f"/api/clip/info?camera={cam}&start=0&end=60",
+                              headers={"x-apphub-token": token}).status_code == 401
+            assert client.get(f"/api/export/info?cam={cam}&start=0&end=60",
+                              headers={"x-apphub-token": token}).status_code == 401
+        assert client.get("/api/push/event-context/event-123",
+                          headers={"x-apphub-token": token}).status_code == 401
+        assert client.get("/api/push/status", headers={"x-apphub-token": token}).status_code == 401
+        assert client.get("/api/status", headers={"x-apphub-token": token}).status_code == 401
+        assert not touched(db)
+        assert db.detection_event_by_id.called is False
 
 
 def test_revocation_applies_to_the_next_request(setup):
