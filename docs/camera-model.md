@@ -272,6 +272,29 @@ cams-record owns the schema and the views. `scripts/gen_camconfig_contracts.py` 
 tests check its reader against the vectors and (when both repositories are checked out side by
 side) that the copies are identical.
 
+## Camera management (Admin tab)
+
+The Cameras app (`/cams`) has an **Admin** tab for users with an `auth.admin_roles` role (default
+`admin`); everyone else never sees it, and cams-record refuses its API (`/cams-record/api/admin/*`)
+with 403.
+
+- **List**: every camera with on/off, who can see it, what is recorded, detection state and any
+  recorder that is not recording; a banner with the mode and, in shadow mode, every difference
+  reported by cams-record and cams-detect.
+- **Add / edit**: ID (new cameras only; it never changes), name, on/off, main/sub/snapshot go2rtc
+  streams (suggested from go2rtc's stream list, `go2rtc.api_url`), which stream does each job
+  ("Use defaults": low resolution for live and detection, high resolution for recording, HD live and
+  checking detections), who can see it (everyone, or named people and roles; admins always),
+  detection on/off, and per-camera retention. Masks and zones open cams-detect's mask editor.
+- **History**: who changed what and when, from `config_audit`.
+- **Safety**: the form is read-only while `camera_source` is `file` (nothing would read the changes).
+  Every save carries the revision the form was loaded at, so a change made elsewhere in the meantime
+  is reported instead of overwritten. Settings the form does not show (masks, zones, other detection
+  settings, notification rules, connector settings) are kept as they are.
+
+cams-detect's pages (Cameras, Masks, Events) link to the Admin tab. In `db` mode its Cameras page no
+longer adds or renames cameras; it keeps the detection switch and the mask editor.
+
 ## Phases
 
 | # | Step | Status |
@@ -280,7 +303,7 @@ side) that the copies are identical.
 | 2 | cams_config schema, store, import with equivalence check, registry export | done |
 | 3 | Shadow mode in cams-record and cams-detect | built; off until `camera_source: shadow` |
 | 4 | `camera_source: db` in both, `cams.json` published from cams_config, `export-files` rollback | built; off until switched |
-| 5 | Admin pages in the camera app: cameras, streams and purposes, access, detection | next |
+| 5 | Camera management in the Cameras app (Admin tab): cameras, streams, stream jobs, access, detection on/off, retention, history | built; editable in shadow and db |
 | 6 | Per-camera notification rules (push, MQTT) | |
 | 7 | `tunnel_webcam` connector | |
 
@@ -288,6 +311,6 @@ side) that the copies are identical.
 
 - Phase 4: the hub's own camera editing must be switched off before `access.publish_registry` is
   enabled (the hub's code is not in these repositories).
-- Phase 5: the admin pages need the hub to send the `admin` role in the JWT to the camera app (it
-  already does for cams-detect writes). Until they exist, cameras and access are changed with the
-  `camconfig` command line or the database.
+- The hub still lists cams-detect's pages as their own app tile. They now present themselves as part
+  of the Cameras app and link to its Admin tab; removing the separate tile is a hub setting.
+- Masks and zones are still edited in cams-detect's mask editor (linked from the Admin tab).
