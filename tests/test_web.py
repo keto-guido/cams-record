@@ -4,7 +4,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from cams_record.auth import AuthError, Authenticator
+from cams_record.auth import Authenticator, AuthError
 from cams_record.config import DEFAULTS, deep_merge
 from cams_record.service import Service
 from cams_record.web import create_app
