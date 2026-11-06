@@ -377,9 +377,7 @@ def test_db_mode_switches_from_files_once_cams_config_loads(tmp_path, fake_recor
 
 # ---- export-files: the rollback path ------------------------------------------------------
 
-def test_export_files_round_trip(store, tmp_path, monkeypatch, capsys):
-    from test_camconfig import DETECT, RECORD, REGISTRY
-
+def _export_cli_env(tmp_path, monkeypatch):
     from cams_record.camconfig import __main__ as cli
 
     for key, env in (("host", "CAMS_CONFIG_DB_HOST"), ("port", "CAMS_CONFIG_DB_PORT"),
@@ -388,6 +386,13 @@ def test_export_files_round_trip(store, tmp_path, monkeypatch, capsys):
     pw = tmp_path / "pw"
     pw.write_text(CFG_DB["password"])
     monkeypatch.setenv("CAMS_CONFIG_DB_PASSWORD_FILE", str(pw))
+    return cli
+
+
+def test_export_files_round_trip(store, tmp_path, monkeypatch, capsys):
+    from test_camconfig import DETECT, RECORD, REGISTRY
+
+    cli = _export_cli_env(tmp_path, monkeypatch)
     text = json.dumps(REGISTRY)
     plan = build_plan(DETECT, RECORD, text, {"retention": {"cameras": {"front-door": {"main_days": 7}}}})
     store.save_many(list(plan.cameras.values()), "test")
@@ -404,5 +409,53 @@ def test_export_files_round_trip(store, tmp_path, monkeypatch, capsys):
     assert check_plan(replan, DETECT, RECORD, text) == []
     for cid, raw in RECORD["cameras"].items():
         assert resolve_camera(cid, record["cameras"][cid]).streams() == resolve_camera(cid, raw).streams()
+    # Live-only porch-cam (sub stream, nothing recorded) exports main_stream==sub_stream and reimports.
+    porch = record["cameras"]["porch-cam"]
+    assert porch["main_stream"] == porch["sub_stream"] == "porch-cam"
+    assert porch["record_main"] is False and porch["record_sub"] is False
+    assert set(replan.cameras["porch-cam"].streams) == {"sub"} and "record" not in replan.cameras["porch-cam"].use
     assert cli.main(args) == 2  # never overwrites without --force
     assert cli.main([*args, "--force"]) == 0
+
+
+def test_export_files_single_stream_recorded_round_trip(store, tmp_path, monkeypatch, capsys):
+    """Sub-only and main-only recorded cameras round-trip through export-files with identical recording views."""
+    cli = _export_cli_env(tmp_path, monkeypatch)
+    sub_only = CameraObject(
+        id="porch", name="Porch", visibility="everyone",
+        streams={"sub": Stream("sub", "porch")},
+        use={"live": ("sub",), "snapshot": ("sub",), "record": ("sub",)},
+    )
+    main_only = CameraObject(
+        id="dock", name="Dock", visibility="everyone",
+        streams={"main": Stream("main", "dock")},
+        use={"live": ("main",), "snapshot": ("main",), "record": ("main",)},
+    )
+    assert sub_only.validate() == [] and main_only.validate() == []
+    before = {c.id: record_camera(c) for c in (sub_only, main_only)}
+    store.save_many([sub_only, main_only], "test")
+
+    rec, det = tmp_path / "record.yaml", tmp_path / "detect.yaml"
+    args = ["--config-dir", str(tmp_path), "export-files", "--record-out", str(rec), "--detect-out", str(det)]
+    assert cli.main(args) == 0
+    capsys.readouterr()
+    record = yaml.safe_load(rec.read_text())
+    # Sub-only export intentionally writes main_stream == sub_stream with only sub recorded.
+    assert record["cameras"]["porch"] == {
+        "main_stream": "porch", "sub_stream": "porch", "enabled": True,
+        "record_main": False, "record_sub": True,
+    }
+    assert "sub_stream" not in record["cameras"]["dock"]
+    assert record["cameras"]["dock"]["record_main"] is True and record["cameras"]["dock"]["record_sub"] is False
+
+    reg = json.dumps([{"id": "porch", "name": "Porch"}, {"id": "dock", "name": "Dock"}])
+    replan = build_plan(yaml.safe_load(det.read_text()), record, reg)
+    assert replan.conflicts == []
+    assert check_plan(replan, {}, record, reg) == []
+    assert set(replan.cameras["porch"].streams) == {"sub"} and replan.cameras["porch"].use["record"] == ("sub",)
+    assert set(replan.cameras["dock"].streams) == {"main"} and replan.cameras["dock"].use["record"] == ("main",)
+    after = {cid: record_camera(cam) for cid, cam in replan.cameras.items()}
+    assert {cid: after[cid].streams() for cid in before} == {cid: before[cid].streams() for cid in before}
+    for cid in before:
+        assert (after[cid].main_stream, after[cid].sub_stream, after[cid].record_main, after[cid].record_sub) == (
+            before[cid].main_stream, before[cid].sub_stream, before[cid].record_main, before[cid].record_sub)

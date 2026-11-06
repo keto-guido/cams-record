@@ -155,6 +155,11 @@ def test_import_sub_only_camera_is_not_a_conflict():
     cam = plan.cameras["porch-cam"]
     assert set(cam.streams) == {"sub"} and cam.use["record"] == ("sub",)
     assert check_plan(plan, {}, record, text) == []
+    # Recording view survives the file shape: still records as sub, never as a duplicated main.
+    rc = record_camera(cam)
+    assert rc.streams() == [("sub", "porch-cam")]
+    assert rc.main_stream == rc.sub_stream == "porch-cam"
+    assert rc.record_main is False and rc.record_sub is True
 
 
 def test_import_conflict_hires_stream_mismatch():
