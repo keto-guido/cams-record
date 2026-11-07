@@ -100,6 +100,8 @@ rule as everything else (`docs/camera-access.md`): the camera id must be in `cam
   `push: camera <id> is not in the camera registry; nobody is notified for it`.
 - `access.enforce: false` (development only) sends every alert to every subscriber, as before.
 - `POST /api/push/test` is not filtered: it only reaches the caller's own devices.
+- A camera whose alerts are **paused** (`docs/alert-pause.md`) notifies nobody until the pause ends;
+  its events are still claimed, so no backlog is sent on resume. Test pushes ignore pauses.
 
 ## Detection integration
 

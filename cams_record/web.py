@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from .auth import Authenticator, AuthError, Principal
 from .camera_access import CameraAccess, Viewer
@@ -18,6 +19,7 @@ from .clips import ClipError, Clips, merge_spans, parse_time, validate_window
 from .config import CAMERA_ID_RE
 from .db import DBUnavailable
 from .media import MAX_SEGMENT_OFFSET_MS, Media, playback_entries, playlist
+from .pauses import MAX_PAUSE_S, PauseError, next_morning
 from .push import DetectionEvent, PushError, PushService, normalize_event_id
 
 log = logging.getLogger(__name__)
@@ -326,6 +328,88 @@ def create_app(service, cfg: dict):
             return push.notify_user(user.sub, event, test=True)
         except PushError as exc:
             raise HTTPException(exc.status, exc.detail) from exc
+
+    # ---- phone alert pauses (cams_record/pauses.py): per camera, for every subscriber ----
+    # Anyone who can view a camera sees whether its alerts are paused; only its owners (users named
+    # in the registry entry) and admins change that. Cameras the viewer cannot see are never listed,
+    # and a write to one answers the same 404 as an unknown camera.
+    pauses = getattr(service, "pauses", None)
+    admin_roles = tuple(cfg["auth"].get("admin_roles") or ["admin"])
+
+    def visible_alert_cameras(who: Viewer) -> dict[str, str]:
+        cams = service.alert_cameras() if hasattr(service, "alert_cameras") else {}
+        if not access.enforce:
+            return cams
+        return {cid: name for cid, name in cams.items() if access.can_view_camera(cid, who)}
+
+    def pause_entry(cid: str, name: str, who: Viewer, p) -> dict:
+        editable = access.can_manage_alerts(cid, who, admin_roles)
+        return {"camera_id": cid, "name": name, "paused": p is not None,
+                "until_ts": p.until_ts if p else None, "until": pauses.iso(p.until_ts) if p else None,
+                "mode": pauses.mode_of(p), "set_by": (p.set_by if p and editable else None),
+                "can_edit": editable}
+
+    def pause_target(request: Request, cam: str, who: Viewer) -> str:
+        """Checks shared by PUT and DELETE; returns the camera's name."""
+        site = request.headers.get("sec-fetch-site")
+        if site and site not in ("same-origin", "none"):
+            raise HTTPException(403, "cross-site request refused")
+        if pauses is None:
+            raise HTTPException(503, "alert pauses need the database")
+        if not CAMERA_ID_RE.fullmatch(cam):
+            raise HTTPException(400, "invalid camera id")
+        names = visible_alert_cameras(who)
+        if cam not in names:
+            raise HTTPException(404, "camera not found")
+        if not access.can_manage_alerts(cam, who, admin_roles):
+            raise HTTPException(403, "only this camera's owners or an admin can pause its alerts")
+        return names[cam]
+
+    @r.get("/api/push/pauses")
+    def push_pauses(who: Viewer = Depends(viewer)):
+        if pauses is None:
+            raise HTTPException(503, "alert pauses need the database")
+        active = pauses.active()
+        now = pauses.clock()
+        cams = visible_alert_cameras(who)
+        body = {
+            "timezone": str(pauses.tz.key), "now": now, "morning_ts": next_morning(now, pauses.tz),
+            "options": [{"duration": "1h", "label": "1 h"}, {"duration": "3h", "label": "3 h"},
+                        {"duration": "morning", "label": "Until morning"}],
+            "max_seconds": MAX_PAUSE_S,
+            "cameras": [pause_entry(cid, name, who, active.get(cid))
+                        for cid, name in sorted(cams.items(), key=lambda kv: (kv[1].lower(), kv[0]))],
+        }
+        return JSONResponse(body, headers=PRIVATE_NO_STORE)
+
+    @r.put("/api/push/pauses/{cam}")
+    async def push_pause_set(cam: str, request: Request, who: Viewer = Depends(viewer)):
+        name = pause_target(request, cam, who)
+        # JSON only: a cross-site form cannot send it without a CORS preflight (same rule as /api/admin).
+        if (request.headers.get("content-type") or "").split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(415, "send JSON")
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "invalid JSON") from exc
+        if not isinstance(body, dict) or set(body) != {"duration"}:
+            raise HTTPException(422, 'expected {"duration": "1h" | "3h" | "morning" | seconds}')
+        try:
+            p = await run_in_threadpool(pauses.pause, cam, body["duration"], who.user)
+        except PauseError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+        except DBUnavailable as exc:
+            raise HTTPException(503, "database unavailable") from exc
+        return JSONResponse(pause_entry(cam, name, who, p), headers=PRIVATE_NO_STORE)
+
+    @r.delete("/api/push/pauses/{cam}")
+    def push_pause_clear(cam: str, request: Request, who: Viewer = Depends(viewer)):
+        name = pause_target(request, cam, who)
+        try:
+            pauses.resume(cam, who.user)
+        except DBUnavailable as exc:
+            raise HTTPException(503, "database unavailable") from exc
+        return JSONResponse(pause_entry(cam, name, who, None), headers=PRIVATE_NO_STORE)
 
     @r.get("/api/push/event-context/{event_id}")
     def push_event_context(event_id: str, who: Viewer = Depends(viewer)):

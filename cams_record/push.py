@@ -152,9 +152,11 @@ def notification_payload(event: DetectionEvent, *, test: bool = False) -> dict[s
 class PushService:
     """Owns VAPID config, subscription CRUD helpers, and fan-out sends."""
 
-    def __init__(self, db, cfg: dict, access=None):
+    def __init__(self, db, cfg: dict, access=None, pauses=None):
         self.db = db
         self.cfg = cfg
+        # PushPauses: a paused camera's detections are claimed but not sent (cams_record/pauses.py).
+        self.pauses = pauses
         # CameraAccess: detection pushes go only to subscribers who may view the camera.
         # None (or access.enforce false) keeps the old behaviour of sending to everyone.
         self.access = access
@@ -336,6 +338,13 @@ class PushService:
         if not test:
             if not self.db.claim_push_event(event.id, event.camera_id):
                 return {"ok": True, "deduped": True, "sent": 0}
+            # Claimed above even while paused, so resuming never releases a backlog of old alerts.
+            pause = self.pauses.get(event.camera_id) if self.pauses is not None else None
+            if pause is not None:
+                log.debug("push: %s is paused until %.0f; event %s claimed, not sent",
+                          event.camera_id, pause.until_ts, event.id)
+                return {"ok": True, "paused": True, "paused_until": pause.until_ts, "sent": 0,
+                        "event_id": event.id}
         payload = notification_payload(event, test=test)
         rows = self.db.list_push_subscriptions()
         if not test and self.access is not None and self.access.enforce:

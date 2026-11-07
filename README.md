@@ -38,6 +38,7 @@ writes 60 s MP4 segments from go2rtc, indexes them in the NAS's **MariaDB** and 
 - [Rollback](#rollback)
 - [HTTP API](#http-api)
 - [Web Push detection alerts](#web-push-detection-alerts)
+- [Pausing phone alerts per camera](#pausing-phone-alerts-per-camera)
 - [Development](#development)
 
 ## Layout and timestamps
@@ -188,6 +189,7 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | `recorder_status` | per (camera, quality): `state, last_segment_ts, restarts_24h, last_error` |
 | `push_subscriptions` | Web Push endpoints bound to App Hub JWT `sub` (schema v5) |
 | `push_sent_events` | detection `event_id` claim table to avoid duplicate alerts (schema v5; `event_id` widened to `VARCHAR(64)` in v6 for string cams_detect `events.event_uid` values) |
+| `push_pauses` | per-camera phone alert pause: `camera_id` (PK), `until_ts`, `set_by`, `set_at` (schema v8); see [`docs/alert-pause.md`](docs/alert-pause.md) |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
 end_ts)`, `INDEX(end_ts)`, `INDEX(path)` and `INDEX(deleted_at, quality, start_ts)`. The path index
@@ -383,6 +385,7 @@ These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is
 | `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile, `retention` (below) |
 | `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog, `cams_record_retention_*` |
 | `GET/POST/DELETE /api/push/*` | cams or admin JWT | Web Push subscribe/status/test/event-context; see [Web Push](#web-push-detection-alerts) |
+| `GET /api/push/pauses`, `PUT/DELETE /api/push/pauses/{cam}` | cams or admin JWT; writes: camera owners and admins | per-camera phone alert pause; see [`docs/alert-pause.md`](docs/alert-pause.md) |
 | `POST /api/internal/detection-event` | `x-cams-push-secret` | cams-detect webhook only; not a public send API |
 
 `retention` in `/api/status`:
@@ -421,6 +424,15 @@ Summary:
 - **iPhone**: alerts only work from the **installed** Home Screen PWA, not Safari tabs.
 - **Companion work**: deploy updated `apphub/` assets to App Hub; optionally teach
   cams-detect to POST `/api/internal/detection-event` for lower latency (poller works alone).
+
+## Pausing phone alerts per camera
+
+A camera's phone notifications can be paused for 1 h, 3 h, until 07:00 (`clips.timezone`) or a number of
+seconds, from the Cameras app (bell on each tile and the camera page, and the Alerts view `/cams/#alerts`),
+the HTTP API, or Home Assistant over MQTT (optional, `mqtt.enabled`, own `cams-record/` namespace).
+Recording, detection, the event log and cams-detect's MQTT topics are not affected; paused events are
+claimed, so resuming sends no backlog. Details, permissions, MQTT entities and the deployment checklist:
+[`docs/alert-pause.md`](docs/alert-pause.md).
 
 ## Development
 

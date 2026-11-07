@@ -67,3 +67,16 @@ push:
   roles_max_age_days: 30   # alerts follow per-camera access; roles saved with a subscription expire after this
   ttl_s: 86400
   timeout_s: 10
+  pause_refresh_s: 30      # per-camera alert pauses are re-read this often; docs/alert-pause.md
+# Home Assistant controls for the phone alert pause (optional; docs/alert-pause.md). Own namespace,
+# never cams-detect/. Needs secrets/mqtt_password when username is set.
+mqtt:
+  enabled: false
+  host: 127.0.0.1
+  port: 1883
+  username: cams-record
+  password_file: /run/secrets/mqtt_password
+  client_id: cams-record
+  discovery_prefix: homeassistant
+  base_topic: cams-record
+  switch_on: 1h            # what turning the HA switch on pauses for

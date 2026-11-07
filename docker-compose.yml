@@ -30,6 +30,7 @@ services:
       - apphub_jwt
       - vapid_private_key
       - push_webhook_secret
+      # - mqtt_password           # Home Assistant alert pause controls (docs/alert-pause.md); uncomment with the file
     # Synology's kernel lacks CFS quota support, so `cpus:` fails there; use a relative CPU weight.
     cpu_shares: 256
     mem_limit: 512m
@@ -55,3 +56,5 @@ secrets:
     file: ./secrets/vapid_private_key   # PEM private key for Web Push VAPID (never commit)
   push_webhook_secret:
     file: ./secrets/push_webhook_secret # shared secret for cams-detect → cams-record webhook
+  # mqtt_password:
+  #   file: ./secrets/mqtt_password  # MQTT broker password (same convention as cams-detect); only with mqtt.enabled
