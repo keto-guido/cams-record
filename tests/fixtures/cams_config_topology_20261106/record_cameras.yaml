@@ -1,0 +1,31 @@
+cameras:
+  front-yard:
+    main_stream: front-yard-main
+    sub_stream: front-yard
+    enabled: true
+    record_main: true
+    record_sub: true
+  front-door:
+    main_stream: front-door-main
+    sub_stream: front-door
+    enabled: true
+    record_main: true
+    record_sub: true
+  back-door:
+    main_stream: back-door-main
+    sub_stream: back-door
+    enabled: true
+    record_main: true
+    record_sub: true
+  back-yard:
+    main_stream: back-yard-main
+    sub_stream: back-yard-raw
+    enabled: true
+    record_main: true
+    record_sub: true
+  main-st-south:
+    main_stream: main-st-south-main
+    sub_stream: main-st-south
+    enabled: true
+    record_main: true
+    record_sub: true

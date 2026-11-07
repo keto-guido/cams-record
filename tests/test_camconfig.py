@@ -172,10 +172,62 @@ def test_import_conflict_hires_stream_mismatch():
     assert plan.conflicts == [] and any("unused today" in w for w in plan.warnings)
 
 
-def test_import_conflict_detects_on_unknown_stream():
-    detect = {"cameras": {"front-door": {"stream": "front-door-wide", "main_stream": "front-door-main"}}}
-    plan, _ = _plan(detect=detect)
-    assert any("detects on 'front-door-wide'" in c for c in plan.conflicts)
+def test_import_keeps_detect_alias_outside_recorded_streams():
+    """Detect/live may use a go2rtc name that is neither recorded main nor sub (live topology back-yard)."""
+    detect = {"cameras": {"back-yard": {"name": "back-yard", "stream": "back-yard", "enabled": True}}}
+    record = {"cameras": {"back-yard": {"main_stream": "back-yard-main", "sub_stream": "back-yard-raw"}}}
+    reg = [{"id": "back-yard", "name": "Back Yard", "snap": "back-yard-raw"}]
+    plan, text = _plan(detect=detect, record=record, reg=reg)
+    assert plan.conflicts == [] and plan.ok
+    cam = plan.cameras["back-yard"]
+    assert {k: s.go2rtc_name for k, s in cam.streams.items()} == {
+        "main": "back-yard-main", "sub": "back-yard-raw", "detect": "back-yard",
+    }
+    assert cam.use["detect"] == ("detect",) and cam.use["live"] == ("detect",)
+    assert cam.use["snapshot"] == ("sub",) and cam.use["verify"] == ("main",)
+    assert cam.use["record"] == ("main", "sub")
+    assert detect_camera(cam)["stream"] == "back-yard"
+    assert detect_camera(cam)["main_stream"] == "back-yard-main"
+    assert detect_camera(cam)["name"] == "back-yard" and cam.name == "Back Yard"
+    assert record_camera(cam).streams() == [("main", "back-yard-main"), ("sub", "back-yard-raw")]
+    assert check_plan(plan, detect, record, text) == []
+
+
+def test_import_detect_only_without_explicit_main_does_not_invent_hd():
+    """mckinley-webcam: detect+registry only; missing {id}-main must not become verify/live_hd."""
+    detect = {"cameras": {"mckinley-webcam": {
+        "name": "mckinley-webcam", "stream": "mckinley-webcam", "enabled": True,
+        "motion_mask": [], "object_mask": [], "zones": {},
+    }}}
+    reg = [{"id": "mckinley-webcam", "name": "McKinley Webcam", "users": ["viewer"]}]
+    plan, text = _plan(detect=detect, record={}, reg=reg)
+    assert plan.ok and plan.conflicts == []
+    cam = plan.cameras["mckinley-webcam"]
+    assert set(cam.streams) == {"sub"} and cam.streams["sub"].go2rtc_name == "mckinley-webcam"
+    assert "verify" not in cam.use and "live_hd" not in cam.use and "record" not in cam.use
+    view = detect_camera(cam)
+    assert view["stream"] == "mckinley-webcam" and "main_stream" not in view
+    assert view["name"] == "mckinley-webcam" and cam.name == "McKinley Webcam"
+    assert cam.visibility == "restricted" and cam.users == ("viewer",)
+    assert check_plan(plan, detect, {}, text) == []
+
+
+def test_import_recording_only_is_admin_inventory_not_end_user_live():
+    """main-st-south: record-only → Admin inventory (restricted, no grants); non-admins stay denied."""
+    record = {"cameras": {"main-st-south": {
+        "main_stream": "main-st-south-main", "sub_stream": "main-st-south",
+        "record_main": True, "record_sub": True,
+    }}}
+    plan, text = _plan(detect={}, record=record, reg=[])
+    assert plan.ok
+    cam = plan.cameras["main-st-south"]
+    assert cam.visibility == "restricted" and not cam.users and not cam.roles
+    assert cam.detection is None and cam.use["record"] == ("main", "sub")
+    assert any("Admin inventory only" in w for w in plan.warnings)
+    assert check_plan(plan, {}, record, text) == []
+    exported = parse_registry(json.dumps(registry(plan.cameras)))
+    assert can_access(exported["main-st-south"], "root", ["admin"])
+    assert not can_access(exported["main-st-south"], "someone", ["cams"])
 
 
 def test_import_rejects_urls_and_bad_ids():
@@ -191,7 +243,11 @@ def test_import_warns_about_unregistered_and_renamed_cameras():
     assert any("front-door: cams-detect calls it 'Front'" in w for w in plan.warnings)
     assert any("shed: not in cams.json today" in w for w in plan.warnings)
     assert plan.cameras["shed"].visibility == "restricted" and not plan.cameras["shed"].users
+    # Detect-only without explicit main_stream: low-res only (no invented shed-main).
+    assert set(plan.cameras["shed"].streams) == {"sub"} and "verify" not in plan.cameras["shed"].use
     assert check_plan(plan, detect, {}, text) == []  # shed: nobody -> admins only is the expected change
+    assert detect_camera(plan.cameras["front-door"])["name"] == "Front"
+    assert plan.cameras["front-door"].name == "Front Door"
 
 
 def test_check_plan_catches_a_changed_camera():
@@ -204,6 +260,47 @@ def test_check_plan_catches_a_changed_camera():
     assert any("front-door: cams-record would change" in d for d in diffs)
     assert any("front-door: cams-detect settings would change" in d for d in diffs)
     assert any("back-yard: access for user 'someone-else'" in d for d in diffs)
+
+
+def test_live_topology_20261106_six_id_union_is_equivalent():
+    """Exact sanitized Jefferson snapshot: union of 6, aliases preserved, no invented webcam HD."""
+    fix = ROOT / "tests" / "fixtures" / "cams_config_topology_20261106"
+    detect = yaml.safe_load((fix / "detect_cameras.yaml").read_text())
+    record = yaml.safe_load((fix / "record_cameras.yaml").read_text())
+    text = (fix / "cams.json").read_text()
+    plan = build_plan(detect, record, text)
+    assert plan.ok and plan.conflicts == []
+    assert sorted(plan.cameras) == sorted(plan.expected_ids) == [
+        "back-door", "back-yard", "front-door", "front-yard", "main-st-south", "mckinley-webcam",
+    ]
+    assert check_plan(plan, detect, record, text) == []
+
+    by = plan.cameras["back-yard"]
+    assert {k: s.go2rtc_name for k, s in by.streams.items()} == {
+        "main": "back-yard-main", "sub": "back-yard-raw", "detect": "back-yard",
+    }
+    assert record_camera(by).streams() == [("main", "back-yard-main"), ("sub", "back-yard-raw")]
+    assert detect_camera(by)["stream"] == "back-yard"
+    assert detect_camera(by)["main_stream"] == "back-yard-main"
+    assert detect_camera(by)["name"] == "back-yard" and by.name == "Back Yard"
+    assert by.detection["zones"]["backyard"]  # masks/zones untouched
+
+    web = plan.cameras["mckinley-webcam"]
+    assert set(web.streams) == {"sub"} and "main_stream" not in detect_camera(web)
+    assert web.users == ("<redacted>",) and web.visibility == "restricted"
+
+    mss = plan.cameras["main-st-south"]
+    assert mss.detection is None and mss.visibility == "restricted" and not mss.users
+    exported = parse_registry(json.dumps(registry(plan.cameras)))
+    assert can_access(exported["main-st-south"], "admin-user", ["admin"])
+    assert not can_access(exported["main-st-south"], "cams-user", ["cams"])
+    assert not can_access(exported["mckinley-webcam"], "cams-user", ["cams"])
+    assert can_access(exported["mckinley-webcam"], "<redacted>", [])
+
+    fy = plan.cameras["front-yard"]
+    assert fy.name == "Front Yard" and detect_camera(fy)["name"] == "front-yard"
+    # Five dual-record cameras → ten recording streams; webcam records nothing.
+    assert sum(len(record_camera(c).streams()) for c in plan.cameras.values()) == 10
 
 
 def test_shared_vectors_survive_import_and_export():
@@ -307,3 +404,26 @@ def test_cli_import_apply_and_export(store, tmp_path, monkeypatch, capsys):
     (tmp_path / "record.yaml").write_text(yaml.safe_dump({"cameras": {"front-door": {"sub_stream": "front-door"}}}))
     assert cli.main([*args, "--apply"]) == 2  # conflicts block writing
     assert "CONFLICT: front-door" in capsys.readouterr().out
+
+    # Fail-closed on the live back-yard alias shape used to omit one camera from a 6-id union:
+    # a conflict must report MISSING and refuse --apply (no partial import).
+    fix = ROOT / "tests" / "fixtures" / "cams_config_topology_20261106"
+    from cams_record.camconfig import importer as imp
+    real_build = imp.build_plan
+
+    def broken_build(*a, **kw):
+        plan = real_build(*a, **kw)
+        plan.conflicts.append("back-yard: forced conflict for refuse-partial test")
+        plan.cameras.pop("back-yard", None)
+        return plan
+
+    monkeypatch.setattr(imp, "build_plan", broken_build)
+    monkeypatch.setattr(cli, "build_plan", broken_build)
+    topo_args = ["--config-dir", str(tmp_path), "import",
+                 "--detect", str(fix / "detect_cameras.yaml"),
+                 "--record", str(fix / "record_cameras.yaml"),
+                 "--registry", str(fix / "cams.json")]
+    assert cli.main([*topo_args, "--apply"]) == 2
+    out = capsys.readouterr().out
+    assert "MISSING: back-yard" in out and "cameras: 5/6" in out
+    assert store.revision() == 1  # previous successful import unchanged

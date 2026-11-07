@@ -9,8 +9,10 @@ from __future__ import annotations
 from ..config import CameraConfig
 from .model import CameraObject
 
-# cameras.yaml keys that cams_config stores outside the detection settings.
-DETECT_STREAM_KEYS = ("name", "stream", "main_stream")
+# Stream fields cams_config stores as stream purposes, not inside camera_detection.settings_json.
+# ``name`` may stay in detection so the detect surface keeps its own display name when it differs
+# from the hub registry name on CameraObject.name.
+DETECT_STREAM_KEYS = ("stream", "main_stream")
 
 
 def record_camera(cam: CameraObject) -> CameraConfig:
@@ -33,7 +35,7 @@ def detect_camera(cam: CameraObject) -> dict | None:
     if stream is None:
         return None
     raw = {k: v for k, v in cam.detection.items() if k not in DETECT_STREAM_KEYS}
-    raw["name"] = cam.name
+    raw.setdefault("name", cam.name)
     raw["stream"] = stream
     verify = cam.stream_for("verify")
     if verify:

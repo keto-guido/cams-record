@@ -428,7 +428,7 @@
       "case": "stray stream keys in settings are ignored",
       "detect": {
         "main_stream": "side-main",
-        "name": "Side",
+        "name": "Old",
         "stream": "side",
         "width": 480
       },

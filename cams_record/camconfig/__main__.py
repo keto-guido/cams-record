@@ -6,8 +6,9 @@
   python -m cams_record.camconfig show [ID]
 
 Database settings come from --config-dir/config.yaml (section cams_config) and CAMS_CONFIG_DB_* env.
-import is a dry run unless --apply; --apply refuses while there are conflicts or behaviour differences,
-and never changes a camera that is already in cams_config.
+import is a dry run unless --apply; --apply refuses while there are conflicts, behaviour differences,
+or any camera missing from the detect∪record∪registry union, and never changes a camera already in
+cams_config. check_plan always runs (fail-closed); save_many is one transaction.
 """
 
 from __future__ import annotations
@@ -49,19 +50,24 @@ def cmd_import(args) -> int:
     record_cfg = _yaml(args.record_config)
     registry_text = Path(args.registry).read_text(encoding="utf-8") if args.registry else None
     plan = build_plan(detect, record, registry_text, record_cfg)
-    diffs = check_plan(plan, detect, record, registry_text) if plan.ok else []
-    print(f"cameras: {len(plan.cameras)}  conflicts: {len(plan.conflicts)}  "
-          f"warnings: {len(plan.warnings)}  behaviour differences: {len(diffs)}")
-    for title, items in (("CONFLICT", plan.conflicts), ("DIFFERENCE", diffs), ("WARNING", plan.warnings)):
+    # Always run check_plan (including on partial plans) so dry-run fail-closes on every issue.
+    diffs = check_plan(plan, detect, record, registry_text)
+    missing = plan.missing_ids
+    print(f"cameras: {len(plan.cameras)}/{len(plan.expected_ids)}  conflicts: {len(plan.conflicts)}  "
+          f"warnings: {len(plan.warnings)}  behaviour differences: {len(diffs)}  missing: {len(missing)}")
+    for title, items in (("CONFLICT", plan.conflicts), ("DIFFERENCE", diffs), ("MISSING", missing),
+                         ("WARNING", plan.warnings)):
         for line in items:
             print(f"{title}: {line}")
     if args.verbose:
         print(json.dumps({cid: c.to_dict() for cid, c in plan.cameras.items()}, indent=2, sort_keys=True))
+    blocked = bool(plan.conflicts or diffs or missing)
     if not args.apply:
         print("dry run: nothing written (add --apply to write)")
-        return 1 if (plan.conflicts or diffs) else 0
-    if plan.conflicts or diffs:
-        print("not applied: fix the conflicts and differences first", file=sys.stderr)
+        return 1 if blocked else 0
+    if blocked:
+        print("not applied: fix the conflicts, differences and missing cameras first "
+              "(refusing a partial import of the detect∪record∪registry union)", file=sys.stderr)
         return 2
     store = CamConfigStore(open_db(_db_cfg(args.config_dir)))
     _, existing = store.load_all()
@@ -71,6 +77,7 @@ def cmd_import(args) -> int:
     if not new:
         print("nothing to write")
         return 0
+    # One transaction via save_many: all new cameras or none.
     rev = store.save_many(new, args.actor, action="import")
     print(f"imported {len(new)} cameras (revision {rev})")
     return 0
@@ -95,10 +102,15 @@ def cmd_export_files(args) -> int:
     record, detect, retention = {}, {}, {}
     for cid, cam in cams.items():
         rc = record_camera(cam)
-        record[cid] = {"main_stream": rc.main_stream, "sub_stream": rc.sub_stream, "enabled": rc.enabled,
-                       "record_main": rc.record_main, "record_sub": rc.record_sub}
-        if rc.sub_stream is None:
-            del record[cid]["sub_stream"]
+        # Detect-only cameras (e.g. mckinley-webcam) were never in cams-record's cameras.yaml.
+        # Do not invent a record stanza with main==sub==id — that breaks reimport HD checks.
+        write_record = ("record" in cam.effective_use() or "main" in cam.streams
+                        or cam.detection is None)
+        if write_record:
+            record[cid] = {"main_stream": rc.main_stream, "sub_stream": rc.sub_stream, "enabled": rc.enabled,
+                           "record_main": rc.record_main, "record_sub": rc.record_sub}
+            if rc.sub_stream is None:
+                del record[cid]["sub_stream"]
         d = detect_camera(cam)
         if d is not None:
             detect[cid] = d

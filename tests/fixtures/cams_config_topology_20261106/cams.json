@@ -1,0 +1,26 @@
+[
+  {
+    "id": "front-yard",
+    "name": "Front Yard"
+  },
+  {
+    "id": "front-door",
+    "name": "Front Door"
+  },
+  {
+    "id": "back-door",
+    "name": "Back Door"
+  },
+  {
+    "id": "back-yard",
+    "name": "Back Yard",
+    "snap": "back-yard-raw"
+  },
+  {
+    "id": "mckinley-webcam",
+    "name": "McKinley Webcam",
+    "users": [
+      "<redacted>"
+    ]
+  }
+]
