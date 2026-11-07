@@ -1,10 +1,12 @@
 """Turn today's files (cams-detect cameras.yaml, cams-record cameras.yaml + retention, App Hub
 cams.json) into camera objects, and prove the result behaves the same before anything is written.
 
-``build_plan`` never guesses: wherever the files disagree about a stream it records a conflict, and
-``--apply`` refuses to write while any conflict is left. ``check_plan`` re-derives each service's view
-from the plan (views.py) and compares it with what the files produce today, including every access
-decision the registry makes.
+``build_plan`` never guesses about retargeting: wherever detect and record disagree about which
+go2rtc name is the high-res verify/main stream it records a conflict, and ``--apply`` refuses to
+write while any conflict or behaviour difference is left. Distinct live/detect/record aliases are
+kept as separate stream keys. ``check_plan`` re-derives each service's view from the plan
+(views.py) and compares it with what the files produce today, including every access decision the
+registry makes.
 """
 
 from __future__ import annotations
@@ -15,19 +17,24 @@ from dataclasses import dataclass, field
 
 from ..camera_access import can_access, can_stream, parse_registry
 from ..config import resolve_camera
-from .model import CameraObject, Stream
+from .model import STREAM_KEY_RE, CameraObject, Stream
 from .views import DETECT_STREAM_KEYS, detect_camera, record_camera, registry
 
 
 @dataclass
 class Plan:
     cameras: dict[str, CameraObject] = field(default_factory=dict)
+    expected_ids: set[str] = field(default_factory=set)  # union of detect ∪ record ∪ registry
     conflicts: list[str] = field(default_factory=list)  # block --apply
     warnings: list[str] = field(default_factory=list)  # behaviour changes to read before applying
 
     @property
     def ok(self) -> bool:
-        return not self.conflicts
+        return not self.conflicts and set(self.cameras) == self.expected_ids
+
+    @property
+    def missing_ids(self) -> list[str]:
+        return sorted(self.expected_ids - set(self.cameras))
 
 
 def _is_go2rtc_name(stream: str) -> bool:
@@ -52,8 +59,8 @@ def build_plan(detect_yaml: dict | None, record_yaml: dict | None, registry_text
         except ValueError as exc:
             plan.conflicts.append(f"{cid}: cams-record cameras.yaml: {exc}")
 
-    ids = sorted(set(map(str, detect)) | set(record) | set(reg))
-    for order, cid in enumerate(ids):
+    plan.expected_ids = set(map(str, detect)) | set(record) | set(reg)
+    for order, cid in enumerate(sorted(plan.expected_ids)):
         d = detect.get(cid)
         if d is not None and not isinstance(d, dict):
             d = {}
@@ -79,20 +86,49 @@ def _raw_registry_ids(text: str | None) -> set[str]:
     return {e["id"] for e in data if isinstance(e, dict) and isinstance(e.get("id"), str)}
 
 
+def _stream_key(streams: dict[str, Stream], go2rtc_name: str, prefer: str) -> str:
+    """Reuse an existing key for this go2rtc name, or add ``prefer`` (or prefer2, …)."""
+    for key, stream in streams.items():
+        if stream.go2rtc_name == go2rtc_name:
+            return key
+    key = prefer if prefer not in streams else None
+    if key is None:
+        n = 2
+        while True:
+            candidate = f"{prefer}{n}"
+            if candidate not in streams and STREAM_KEY_RE.fullmatch(candidate):
+                key = candidate
+                break
+            n += 1
+    streams[key] = Stream(key, go2rtc_name)
+    return key
+
+
 def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
     conflicts_before = len(plan.conflicts)
     # -- streams ----------------------------------------------------------------
     d_sub = d_main = None
+    d_main_explicit = False
     if d is not None:
         d_sub = str(d.get("stream", cid))
         if not _is_go2rtc_name(d_sub):
             plan.conflicts.append(f"{cid}: cams-detect reads a URL or file ({d_sub!r}), not a go2rtc stream")
             return None
-        d_main = str(d.get("main_stream") or f"{d_sub}-main")
+        d_main_explicit = "main_stream" in d
+        d_main = str(d["main_stream"]) if d_main_explicit else str(f"{d_sub}-main")
+    if rc is not None and not rc.streams() and not rc.record_main and not rc.record_sub \
+            and rc.sub_stream in (None, rc.main_stream) and d is not None:
+        # export-files used to emit a inert record stub for detect-only cameras; ignore it so we
+        # do not invent an HD conflict against a synthesized {stream}-main.
+        rc = None
     if rc is not None:
         main, sub = rc.main_stream, rc.sub_stream
-    elif d is not None:
+    elif d is not None and d_main_explicit:
+        # Detect-only with an explicit HD name: keep it. Do not invent {stream}-main when the key
+        # was omitted (webcam low-res only; missing HD must not appear as live_hd/verify).
         main, sub = d_main, d_sub
+    elif d is not None:
+        main, sub = None, d_sub
     else:  # only in cams.json: the hub plays the stream named after the id
         main, sub = None, cid
     if rc is not None and not _is_go2rtc_name(main):
@@ -105,9 +141,9 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
             plan.conflicts.append(f"{cid}: main_stream and sub_stream are the same stream {main!r}; "
                                   "set cams-record main_stream to the high-resolution stream")
     if d is not None and rc is not None:
-        if d_sub not in (sub, main):
-            plan.conflicts.append(f"{cid}: cams-detect detects on {d_sub!r}, which cams-record does not know "
-                                  f"(main {main!r}, sub {sub!r})")
+        # Detect may use a go2rtc alias that is neither recorded main nor sub (e.g. live ``back-yard``
+        # while recording ``back-yard-main`` + ``back-yard-raw``). That is stored as an extra stream
+        # key below; only a mismatched high-res verify target is a conflict.
         uses_main = bool(d.get("hires_snapshot", True))
         if d_main != main:
             msg = (f"{cid}: cams-detect's high-resolution stream is {d_main!r} but cams-record records "
@@ -119,11 +155,15 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
     if len(plan.conflicts) > conflicts_before:
         return None
 
-    streams = {}
+    streams: dict[str, Stream] = {}
     if main is not None:
         streams["main"] = Stream("main", main)
     if sub is not None and sub != main:
         streams["sub"] = Stream("sub", sub)
+    if d is not None:
+        # May add a third alias when detect/live use a go2rtc name that is neither recorded main
+        # nor sub (back-yard → detect on ``back-yard``, record ``back-yard-main`` + ``back-yard-raw``).
+        _stream_key(streams, d_sub, "detect")
     by_name = {s.go2rtc_name: k for k, s in streams.items()}
 
     # -- purposes -----------------------------------------------------------------
@@ -132,7 +172,7 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
     if live_key is None:
         plan.warnings.append(f"{cid}: the hub's live view plays go2rtc stream {cid!r}, which is not one of "
                              f"this camera's streams ({', '.join(sorted(by_name))})")
-        live_key = "sub" if "sub" in streams else "main"
+        live_key = "sub" if "sub" in streams else ("detect" if "detect" in streams else "main")
     use["live"] = (live_key,)
     if "main" in streams:
         use["live_hd"] = ("main",)
@@ -141,10 +181,13 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
     if snap_key is None:
         streams["snap"] = Stream("snap", snap_name)
         snap_key = "snap"
+        by_name[snap_name] = snap_key
     use["snapshot"] = (snap_key,)
     if d is not None:
         use["detect"] = (by_name[d_sub],)
-        if "main" in streams:
+        # Verify / HD snapshot only when we have a real main stream. Detect-only cameras without an
+        # explicit main_stream stay low-res (no synthesized {stream}-main).
+        if "main" in streams and (rc is not None or d_main_explicit):
             use["verify"] = ("main",)
     recorded = tuple(q for q, _ in rc.streams()) if rc is not None else ()
     if recorded:  # nothing recorded = no record purpose at all (stored use is authoritative)
@@ -155,11 +198,13 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
     if rg is not None:
         name = rg.name
         if d_name and d_name != name:
-            plan.warnings.append(f"{cid}: cams-detect calls it {d_name!r}, the hub {name!r}; the hub's name is "
-                                 "kept (Home Assistant entity names follow once cams-detect reads cams_config)")
+            plan.warnings.append(f"{cid}: cams-detect calls it {d_name!r}, the hub {name!r}; each surface "
+                                 "keeps its own name (hub registry vs detect settings)")
     else:
         name = d_name or cid
-        plan.warnings.append(f"{cid}: not in cams.json today, so nobody can view it; after import admins can")
+        plan.warnings.append(f"{cid}: not in cams.json today, so nobody can view it; after import admins can "
+                             "see it in Admin inventory only (live registry unchanged while "
+                             "publish_registry is false)")
     if rg is None:
         visibility, users, roles = "restricted", (), ()
     elif not rg.restricted:
@@ -169,6 +214,7 @@ def _build_camera(plan: Plan, cid, d, rc, rg, retention) -> CameraObject | None:
 
     detection = None
     if d is not None:
+        # Keep detect's own name inside settings when present; stream fields come from purposes.
         detection = {k: copy.deepcopy(v) for k, v in d.items() if k not in DETECT_STREAM_KEYS}
     recording = dict(retention) if retention else None
     return CameraObject(id=cid, name=name, visibility=visibility, users=users, roles=roles,
@@ -204,14 +250,35 @@ def check_plan(plan: Plan, detect_yaml: dict | None, record_yaml: dict | None,
             continue
         old_d = old_d or {}
         o_stream = str(old_d.get("stream", cid))
-        o_main = str(old_d.get("main_stream") or f"{o_stream}-main")
-        if (o_stream, o_main) != (new_d["stream"], new_d.get("main_stream")):
+        o_main_explicit = "main_stream" in old_d
+        o_main = str(old_d["main_stream"]) if o_main_explicit else f"{o_stream}-main"
+        n_stream, n_main = new_d["stream"], new_d.get("main_stream")
+        if o_stream != n_stream:
             diffs.append(f"{cid}: cams-detect streams would change from {(o_stream, o_main)} to "
-                         f"{(new_d['stream'], new_d.get('main_stream'))}")
+                         f"{(n_stream, n_main)}")
+        elif o_main_explicit:
+            if n_main != o_main:
+                diffs.append(f"{cid}: cams-detect streams would change from {(o_stream, o_main)} to "
+                             f"{(n_stream, n_main)}")
+        elif n_main is not None and n_main != o_main:
+            # File omitted main_stream (defaulted at runtime). Plan may omit verify entirely so a
+            # missing {stream}-main is not invented; that is not a difference. A different explicit
+            # verify target is.
+            diffs.append(f"{cid}: cams-detect streams would change from {(o_stream, o_main)} to "
+                         f"{(n_stream, n_main)}")
         o_rest = {k: v for k, v in old_d.items() if k not in DETECT_STREAM_KEYS}
         n_rest = {k: v for k, v in new_d.items() if k not in DETECT_STREAM_KEYS}
+        # File omitted name → detect_camera may synthesize CameraObject.name; not a behaviour change.
+        # When the file set a name, it must round-trip on the detect surface (hub name stays separate).
+        if "name" not in old_d:
+            o_rest.pop("name", None)
+            n_rest.pop("name", None)
         if json.dumps(o_rest, sort_keys=True) != json.dumps(n_rest, sort_keys=True):
             diffs.append(f"{cid}: cams-detect settings would change")
+    for cid in sorted(set(detect) - set(plan.cameras)):
+        diffs.append(f"{cid}: cams-detect camera missing from import plan")
+    for cid in sorted(set(record_raw) - set(plan.cameras)):
+        diffs.append(f"{cid}: cams-record camera missing from import plan")
     diffs.extend(check_registry(plan, registry_text))
     return diffs
 
@@ -220,7 +287,8 @@ def check_registry(plan: Plan, registry_text: str | None) -> list[str]:
     """Every access decision the old and the exported cams.json make, for every id, snap and principal.
 
     Cameras that nobody could see before and admins can see now are expected (reported as warnings by
-    build_plan) and skipped; any other difference is returned.
+    build_plan) and skipped; any other difference is returned. Admin inventory visibility is not the
+    same as publishing a new live tile: export is only written when access.publish_registry is true.
     """
     old = parse_registry(registry_text) if registry_text is not None else {}
     new = parse_registry(json.dumps(registry(plan.cameras)))

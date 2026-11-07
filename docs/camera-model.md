@@ -46,7 +46,9 @@ Which stream does which job follows from naming, not settings:
 | Problem | Status |
 |---|---|
 | Push alerts went to every subscriber, ignoring per-camera access | **Fixed**: alerts follow the registry rule; roles saved per subscription (cams-record migration v7, `docs/web-push.md`) |
-| cams-record defaults `main_stream` to the camera id (the low-res stream); cams-detect defaults it to `<id>-main` | **Warned** at startup; the importer refuses such cameras until `main_stream` is set |
+| cams-record defaults `main_stream` to the camera id (the low-res stream); cams-detect defaults it to `<id>-main` | **Warned** at startup; the importer refuses a camera when detect's high-res target disagrees with the recorded main while `hires_snapshot` is on |
+| Detect/live go2rtc name is neither recorded main nor sub (e.g. live `back-yard`, record `back-yard-main` + `back-yard-raw`) | **Supported**: stored as an extra stream key; record and detect aliases are not retargeted |
+| Detect-only camera omits `main_stream` and `{id}-main` is absent from go2rtc | **Supported**: no synthesized HD / verify stream (low-res only) |
 | Camera id rules differ: detect `[a-z0-9_-]{1,48}`, record `{1,64}`, registry no `_` and no trailing `-` | **Warned** in both; new ids from the Cameras page are always registry-valid; cams_config enforces the registry rule |
 | Notification rules are global (`push.labels`) | Planned: `camera_notify_rules` |
 | Adding a camera means editing four files | Planned: admin pages writing cams_config |
@@ -211,8 +213,9 @@ Set `camera_source: shadow` in both services and restart them.
 
 `differences: []` means switching that service changes nothing. A camera added on the cams-detect
 Cameras page during shadow shows as "only in cameras.yaml": re-run the import (it only adds new
-cameras) to bring it in. Name differences matter: in `db` mode Home Assistant device names follow
-the cams_config name (entity ids do not change).
+cameras) to bring it in. When detect and hub display names differ, each surface keeps its own
+(detect settings keep the cameras.yaml name; the hub registry name stays on the camera object).
+Entity ids do not change.
 
 Phase 3 is done when both reports stay empty for a period you trust, including a mask edit and a
 database restart.

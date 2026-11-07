@@ -17,7 +17,7 @@ from cams_record.camconfig.importer import build_plan, check_plan
 from cams_record.camconfig.model import CameraObject, Stream
 from cams_record.camconfig.publish import publish_registry, registry_text
 from cams_record.camconfig.source import CameraSource
-from cams_record.camconfig.views import record_camera
+from cams_record.camconfig.views import detect_camera, record_camera
 from cams_record.config import DEFAULTS, deep_merge, resolve_camera, validate
 from cams_record.db import DBUnavailable
 from cams_record.service import Service
@@ -416,6 +416,40 @@ def test_export_files_round_trip(store, tmp_path, monkeypatch, capsys):
     assert set(replan.cameras["porch-cam"].streams) == {"sub"} and "record" not in replan.cameras["porch-cam"].use
     assert cli.main(args) == 2  # never overwrites without --force
     assert cli.main([*args, "--force"]) == 0
+
+
+def test_export_files_live_topology_round_trip(store, tmp_path, monkeypatch, capsys):
+    """Jefferson 2026-11-06 union of 6 survives import → export-files → reimport without retargeting."""
+    from pathlib import Path
+
+    cli = _export_cli_env(tmp_path, monkeypatch)
+    fix = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "cams_config_topology_20261106"
+    detect = yaml.safe_load((fix / "detect_cameras.yaml").read_text())
+    record = yaml.safe_load((fix / "record_cameras.yaml").read_text())
+    text = (fix / "cams.json").read_text()
+    plan = build_plan(detect, record, text)
+    assert plan.ok and check_plan(plan, detect, record, text) == []
+    store.save_many(list(plan.cameras.values()), "test")
+
+    rec, det = tmp_path / "record.yaml", tmp_path / "detect.yaml"
+    args = ["--config-dir", str(tmp_path), "export-files", "--record-out", str(rec), "--detect-out", str(det)]
+    assert cli.main(args) == 0
+    capsys.readouterr()
+    exported_record, exported_detect = yaml.safe_load(rec.read_text()), yaml.safe_load(det.read_text())
+    replan = build_plan(exported_detect, exported_record, text)
+    assert replan.ok and replan.conflicts == []
+    assert sorted(replan.cameras) == sorted(plan.cameras)
+    assert check_plan(replan, detect, record, text) == []
+    # Exact back-yard aliases and webcam low-res-only must survive rollback files.
+    by = replan.cameras["back-yard"]
+    assert {k: s.go2rtc_name for k, s in by.streams.items()} == {
+        "main": "back-yard-main", "sub": "back-yard-raw", "detect": "back-yard",
+    }
+    assert record_camera(by).streams() == record_camera(plan.cameras["back-yard"]).streams()
+    assert detect_camera(by)["stream"] == "back-yard"
+    web = replan.cameras["mckinley-webcam"]
+    assert "main_stream" not in detect_camera(web) and set(web.streams) == {"sub"}
+    assert replan.cameras["main-st-south"].visibility == "restricted"
 
 
 def test_export_files_single_stream_recorded_round_trip(store, tmp_path, monkeypatch, capsys):
