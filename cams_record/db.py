@@ -111,6 +111,17 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             ADD COLUMN IF NOT EXISTS roles_json VARCHAR(2048) NULL,
             ADD COLUMN IF NOT EXISTS roles_at DATETIME(3) NULL""",
     ]),
+    # Per-camera pause of phone (Web Push) alerts. One row per paused camera; a row whose until_ts has
+    # passed is ignored everywhere, so expiry needs no job. Recording, detection and MQTT are unaffected.
+    (8, [
+        """CREATE TABLE IF NOT EXISTS push_pauses (
+            camera_id VARCHAR(64) NOT NULL PRIMARY KEY,
+            until_ts DATETIME(3) NOT NULL,
+            set_by VARCHAR(128) NOT NULL,
+            set_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+            KEY idx_push_pauses_until (until_ts)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    ]),
 ]
 
 _PUSH_COLUMNS = ("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent", "roles_json", "roles_at")
@@ -124,7 +135,7 @@ def _push_row(r) -> dict:
 
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions",
-          "push_sent_events", "schema_version")
+          "push_sent_events", "push_pauses", "schema_version")
 
 
 class Database:
@@ -430,6 +441,28 @@ class Database:
                 (str(event_id), camera_id))
             return n == 1
         return self.run(q)
+
+    # -- phone alert pauses (cams_record.pauses) ---------------------------------
+    def active_push_pauses(self) -> list[dict]:
+        """Unexpired pauses only; an expired row is the same as no row."""
+        def q(cur):
+            cur.execute("""SELECT camera_id, until_ts, set_by, set_at FROM push_pauses
+                           WHERE until_ts > UTC_TIMESTAMP(3) ORDER BY camera_id""")
+            return [{"camera_id": r[0], "until_ts": from_dt(r[1]), "set_by": r[2], "set_at": from_dt(r[3])}
+                    for r in cur.fetchall()]
+        return self.run(q)
+
+    def set_push_pause(self, camera_id: str, until_ts: float, set_by: str, set_at: float) -> None:
+        def q(cur):
+            cur.execute("DELETE FROM push_pauses WHERE until_ts <= UTC_TIMESTAMP(3)")
+            cur.execute("""INSERT INTO push_pauses (camera_id, until_ts, set_by, set_at) VALUES (%s, %s, %s, %s)
+                           ON DUPLICATE KEY UPDATE until_ts=VALUES(until_ts), set_by=VALUES(set_by),
+                             set_at=VALUES(set_at)""",
+                        (camera_id, to_dt(until_ts), set_by[:128], to_dt(set_at)))
+        self.run(q)
+
+    def clear_push_pause(self, camera_id: str) -> int:
+        return self.run(lambda cur: cur.execute("DELETE FROM push_pauses WHERE camera_id=%s", (camera_id,)))
 
     def protect_window(self, camera: str, start: float, end: float, until: float) -> int:
         with self.retention_lock:
