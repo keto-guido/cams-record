@@ -20,8 +20,8 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('camera_audio.js?v=1'));
-assert(html.indexOf('camera_audio.js?v=1') < html.indexOf('cams.js?v=22'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('camera_audio.js?v=2'));
+assert(html.indexOf('camera_audio.js?v=2') < html.indexOf('cams.js?v=22'));
 assert(html.includes('cams.css?v=17'));
 // Live production (apphub PR #4 / 7c7d020) already shipped cams.js?v=21; never go backwards.
 assert(!html.includes('cams.js?v=20') && !html.includes('cams.js?v=21') && !html.includes('cams.js?v=19'));

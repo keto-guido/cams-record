@@ -296,19 +296,23 @@ with 403. This is the one place to manage a camera object.
 
 ### Audio (cams-audio, not cams_config)
 
-Audio listening and retention are owned by `keto-guido/cams-audio` and are **not** stored in
+Audio enablement and retention are owned by `keto-guido/cams-audio` and are **not** stored in
 `cams_config`. The Admin per-camera page mounts a self-contained panel (`apphub/static/camera_audio.js`)
 that calls the same-origin `/cams-audio` JSON API with the App Hub `apphub_token` cookie:
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/cams-audio/api/cameras` | `[{camera_id, name, audio:{listening, clip_retention_days, transcript_retention_days, stream, has_audio}}]` |
-| GET | `/cams-audio/api/cameras/{id}/audio` | one camera's audio object |
-| PATCH | `/cams-audio/api/cameras/{id}/audio` | partial update; retention integers 1–3650 |
+| GET | `/cams-audio/api/cameras` | `[{camera_id, name, has_audio, source}]` (`source` is null when unlinked) |
+| GET | `/cams-audio/api/cameras/{id}/audio` | `{id, name, type:"camera", enabled, clip_retention_days, transcript_retention_days, camera_id, config:{stream}}` |
+| PATCH | `/cams-audio/api/cameras/{id}/audio` | partial `{enabled, clip_retention_days, transcript_retention_days, stream}`; retention 1–3650 |
 
-`has_audio` decides whether the Audio section appears. `stream` is read-only (e.g. back-yard uses
-`back-yard-raw`). If the list GET returns 404/502 or the network fails, the panel shows
-"Audio service not installed". A 409 on PATCH (listening while `has_audio` is false) is shown inline.
+Defaults: `enabled` on (when a source is already linked), clip retention 90 days, transcript
+retention 365 days. `has_audio` decides whether the Audio section appears. If `has_audio` is true
+but `source` is null, the panel still shows with **Enable** off; turning Enable on sends
+`PATCH …/audio` with `{"enabled": true}`, which creates the linked source — the UI then refreshes
+from the returned `source` object. If the list GET returns 404/502 or the network fails, the panel
+shows "Audio service not installed". PATCH 404 = unknown camera; PATCH 409 (enabling a camera with
+no audio) is shown inline.
 
 ### cams-detect Cameras / Masks / Events pages
 

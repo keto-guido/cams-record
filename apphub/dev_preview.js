@@ -43,25 +43,35 @@ const adminDb={revision:3,history:{},cams:{
   'mckinley-webcam':{id:'mckinley-webcam',name:'McKinley Webcam',enabled:true,connector_type:'go2rtc',connector:{},visibility:'restricted',users:[],roles:[],sort_order:4,streams:{sub:{go2rtc_name:'mckinley-webcam',width:1280,height:720,codec:'h264',fps:5}},use:{live:['sub'],detect:['sub'],snapshot:['sub'],record:['sub']},detection:{enabled:false},recording:null,notify:[]}}};
 adminDb.history['front-door']=[{at:new Date(Date.now()-86400e3).toISOString(),actor:'eric',action:'update',revision:3,before:{recording:null},after:{recording:{main_days:7}}},{at:new Date(Date.now()-3*86400e3).toISOString(),actor:'import',action:'import',revision:1,before:null,after:{}}];
 const audioDb={
-  'front-door':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
-  'back-door':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
-  'front-yard':{listening:false,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
-  'back-yard':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:'back-yard-raw',has_audio:true},
-  'mckinley-webcam':{listening:false,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:false},
+  'front-door':{has_audio:true,source:{id:'src-front-door'},enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:null},
+  'back-door':{has_audio:true,source:{id:'src-back-door'},enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:null},
+  'front-yard':{has_audio:true,source:null,enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:null},
+  'back-yard':{has_audio:true,source:{id:'src-back-yard'},enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:'back-yard-raw'},
+  'mckinley-webcam':{has_audio:false,source:null,enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:null},
 };
+function audioDetail(id,cur){
+  return{id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,type:'camera',enabled:!!cur.enabled,
+    clip_retention_days:cur.clip_retention_days,transcript_retention_days:cur.transcript_retention_days,
+    camera_id:id,config:{stream:cur.stream==null?null:cur.stream},source:cur.source};
+}
 function audioApi(req,res,p,json){
   if(AUDIO_MODE==='missing')return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
-  if(p==='/cams-audio/api/cameras')return json(Object.keys(audioDb).map(id=>({camera_id:id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,audio:{...audioDb[id]}})));
+  if(p==='/cams-audio/api/cameras')return json(Object.keys(audioDb).map(id=>({camera_id:id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,has_audio:!!audioDb[id].has_audio,source:audioDb[id].source})));
   const m=p.match(/^\/cams-audio\/api\/cameras\/([^/]+)\/audio$/);if(!m)return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
   const id=decodeURIComponent(m[1]),cur=audioDb[id];if(!cur)return send(res,404,JSON.stringify({detail:'unknown camera'}),'application/json');
-  if(req.method==='GET')return json({...cur});
+  if(req.method==='GET')return json(audioDetail(id,cur));
   if(req.method!=='PATCH')return send(res,405,JSON.stringify({detail:'method not allowed'}),'application/json');
   let body='';req.on('data',d=>body+=d);req.on('end',()=>{const patch=JSON.parse(body||'{}');
-    if(patch.listening===true&&!cur.has_audio)return send(res,409,JSON.stringify({detail:'listening requires has_audio'}),'application/json');
+    if(patch.enabled===true&&!cur.has_audio)return send(res,409,JSON.stringify({detail:'enabling requires audio'}),'application/json');
     for(const k of ['clip_retention_days','transcript_retention_days']){
       if(patch[k]!=null&&(!Number.isInteger(patch[k])||patch[k]<1||patch[k]>3650))return send(res,422,JSON.stringify({detail:k+' must be 1..3650'}),'application/json');
     }
-    Object.assign(cur,patch);json({...cur});});
+    if(patch.enabled===true&&cur.source==null)cur.source={id:'src-'+id};
+    if(patch.enabled!=null)cur.enabled=!!patch.enabled;
+    if(patch.clip_retention_days!=null)cur.clip_retention_days=patch.clip_retention_days;
+    if(patch.transcript_retention_days!=null)cur.transcript_retention_days=patch.transcript_retention_days;
+    if('stream' in patch)cur.stream=patch.stream;
+    json({...audioDetail(id,cur),source:cur.source});});
 }
 function admin(req,res,p,q,json){
   const fail=(code,detail)=>send(res,code,JSON.stringify({detail}),'application/json');
