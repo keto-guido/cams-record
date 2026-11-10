@@ -187,7 +187,7 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | `segments` | one row per file: `camera_id, quality, start_ts, end_ts` (DATETIME(3) UTC), `duration_ms, path, size_bytes, codec, width, height, fps, has_motion, keep_until, missing, protected, protected_until, deleted_at` |
 | `recorder_status` | per (camera, quality): `state, last_segment_ts, restarts_24h, last_error` |
 | `push_subscriptions` | Web Push endpoints bound to App Hub JWT `sub` (schema v5) |
-| `push_sent_events` | detection `event_id` claim table to avoid duplicate alerts (schema v5; `event_id` widened to `VARCHAR(64)` in v6 for string cams_detect ids) |
+| `push_sent_events` | detection `event_id` claim table to avoid duplicate alerts (schema v5; `event_id` widened to `VARCHAR(64)` in v6 for string cams_detect `events.event_uid` values) |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
 end_ts)`, `INDEX(end_ts)`, `INDEX(path)` and `INDEX(deleted_at, quality, start_ts)`. The path index
