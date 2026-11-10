@@ -13,6 +13,7 @@ from .config import CameraConfig, stream_url
 from .db import Database, DBUnavailable
 from .diskguard import CHECK_INTERVAL, LEVEL_OK, DiskGuard
 from .indexer import Indexer
+from .pauses import PushPauses
 from .protection import DetectionProtection
 from .push import PushNotifier, PushService
 from .reconcile import reconcile
@@ -50,8 +51,16 @@ class Service:
         self.protection = DetectionProtection(db, cfg["detection_protection"])
         # One registry reader shared by the HTTP routes and detection pushes.
         self.access = CameraAccess(cfg["access"], cameras)
-        self.push = PushService(db, cfg.get("push") or {}, access=self.access)
-        self.push_notifier = PushNotifier(self.push, db, cfg.get("push") or {})
+        push_cfg = cfg.get("push") or {}
+        # Phone alert pauses need the database; without one nothing can be paused.
+        self.pauses = (PushPauses(db, (cfg.get("clips") or {}).get("timezone", "America/Chicago"),
+                                  float(push_cfg.get("pause_refresh_s", 30)))
+                       if db is not None else None)
+        self.push = PushService(db, push_cfg, access=self.access, pauses=self.pauses)
+        self.push_notifier = PushNotifier(self.push, db, push_cfg)
+        from . import mqtt
+
+        self.mqtt = mqtt.build(cfg, self.pauses, self.alert_cameras)
         self._guard_seen = LEVEL_OK
         self.started_at = time.time()
         self.reconcile_result: dict | None = None
@@ -59,6 +68,17 @@ class Service:
         self._bg: threading.Thread | None = None
         self._guard_thread: threading.Thread | None = None
         self._source_thread: threading.Thread | None = None
+
+    def alert_cameras(self) -> dict[str, str]:
+        """{camera id: name} of the cameras whose phone alerts can be paused: the camera registry.
+
+        With access.enforce off and no usable registry, the configured cameras stand in (named by id).
+        """
+        registry = self.access.registry.current()
+        if registry or self.access.enforce:
+            return {cid: cam.name for cid, cam in registry.items()}
+        with self._cam_lock:
+            return {cid: cid for cid in self.cameras}
 
     def _wanted_streams(self, cameras: dict[str, CameraConfig]) -> dict[str, tuple[str, str, str]]:
         """recorder key -> (camera id, quality, url) for every stream these cameras record."""
@@ -161,6 +181,11 @@ class Service:
         self.indexer.start()
         self.protection.start()
         self.push_notifier.start()
+        if self.mqtt is not None:
+            try:
+                self.mqtt.start()
+            except Exception:  # noqa: BLE001  (Home Assistant controls must never stop recording)
+                log.exception("mqtt: could not start alert pause controls")
         self.guard.check(startup=True)  # before any recorder starts: refuse them below the minimum
         with self._cam_lock:
             for rec in self.recorders.values():
@@ -222,6 +247,8 @@ class Service:
             self._source_thread.join(timeout=30)
         self.protection.stop()
         self.push_notifier.stop()
+        if self.mqtt is not None:
+            self.mqtt.stop()
         self.janitor.stop()
         with self._cam_lock:
             recorders = list(self.recorders.values())

@@ -191,6 +191,25 @@ class CameraAccess:
             return False
         return can_stream(self.registry.current(), camera, who.user, who.roles)
 
+    def can_manage_alerts(self, camera: str, who: Viewer, admin_roles=(ADMIN_ROLE,)) -> bool:
+        """Who may pause a camera's phone alerts (for everyone): an admin, or an owner, meaning a user
+        named in the camera's registry ``users``. A role grant or an open camera only lets you view.
+
+        Always on top of ``can_view_camera`` (or, with enforce off, a registered camera), so nobody
+        manages a camera they cannot see.
+        """
+        if who.claimed_user is not None and who.claimed_user != who.user:
+            return False
+        if not who.user:
+            return False
+        cameras = self.registry.current()
+        if self.enforce and not can_stream(cameras, camera, who.user, who.roles):
+            return False
+        if set(admin_roles or ()) & set(who.roles):
+            return True
+        entry = cameras.get(camera)
+        return entry is not None and who.user in entry.users
+
     def require(self, camera: str, who: Viewer) -> None:
         if self.enforce and not self.allowed(camera, who):
             raise ClipError(404, "camera not found")

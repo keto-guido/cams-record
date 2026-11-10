@@ -146,7 +146,10 @@ def test_every_camera_route_is_covered(setup):
                    "/cams-record/api/push/event-context/{event_id}", "/cams-record/api/internal/detection-event"}
     covered = {"/cams-record" + u.split("?")[0].replace("{c}", "{cam}").replace("seg/1.ts", "seg/{segment_id}.ts")
                for u in CAMERA_ROUTES}
-    assert found == covered | camera_free | set(ADMIN_ONLY)
+    # Phone alert pauses filter and authorize per camera themselves: tests/test_pauses.py.
+    from tests.test_pauses import PAUSE_ROUTES
+
+    assert found == covered | camera_free | set(ADMIN_ONLY) | set(PAUSE_ROUTES)
 
 
 # Camera management (Cameras app -> Admin tab) manages every camera, so it is admin-role only rather

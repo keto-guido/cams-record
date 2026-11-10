@@ -109,6 +109,24 @@ DEFAULTS: dict[str, Any] = {
         "roles_max_age_days": 30,
         "ttl_s": 86400,
         "timeout_s": 10,
+        # Per-camera alert pauses (push_pauses) are re-read at most this often; changes made through
+        # this process apply at once. "Until morning" ends at 07:00 in clips.timezone.
+        "pause_refresh_s": 30,
+    },
+    # Home Assistant controls for the phone alert pause (cams_record/mqtt.py). Off unless enabled, and
+    # always in its own topic namespace: never cams-detect/, whose topics drive lights and automations.
+    "mqtt": {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 1883,
+        "username": "",
+        "password_file": "/run/secrets/mqtt_password",  # same convention as cams-detect; optional
+        "client_id": "cams-record",
+        "discovery_prefix": "homeassistant",
+        "base_topic": "cams-record",
+        "keepalive": 60,
+        "refresh_s": 30,  # camera list re-check; expiries are published when they happen
+        "switch_on": "1h",  # what turning the HA switch on pauses for
     },
     "db": {
         "host": "127.0.0.1",
@@ -178,6 +196,14 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "PUSH_INTERVAL_S": (("push", "interval_s"), float),
     "PUSH_LOOKBACK_S": (("push", "lookback_s"), float),
     "PUSH_SNAPSHOT_WAIT_S": (("push", "snapshot_wait_s"), float),
+    "MQTT_ENABLED": (("mqtt", "enabled"), bool),
+    "MQTT_HOST": (("mqtt", "host"), str),
+    "MQTT_PORT": (("mqtt", "port"), int),
+    "MQTT_USERNAME": (("mqtt", "username"), str),
+    "MQTT_PASSWORD_FILE": (("mqtt", "password_file"), str),
+    "MQTT_CLIENT_ID": (("mqtt", "client_id"), str),
+    "MQTT_DISCOVERY_PREFIX": (("mqtt", "discovery_prefix"), str),
+    "MQTT_BASE_TOPIC": (("mqtt", "base_topic"), str),
 }
 
 
@@ -422,8 +448,40 @@ def validate(cfg: dict) -> dict:
     subject = str(push.get("vapid_subject") or "").strip()
     if subject and not (subject.startswith("mailto:") or subject.startswith("https://")):
         raise ValueError("push.vapid_subject must be a mailto: or https: URI")
+    if "pause_refresh_s" in push:
+        _positive("push.pause_refresh_s", push["pause_refresh_s"])
+    _validate_mqtt(cfg.setdefault("mqtt", {}))
     _validate_retention(cfg["retention"])
     return cfg
+
+
+_TOPIC_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _validate_mqtt(mq: dict) -> None:
+    if not isinstance(mq.get("enabled", False), bool):
+        raise ValueError("mqtt.enabled must be true or false")
+    for key in ("base_topic", "discovery_prefix", "client_id"):
+        value = mq.get(key)
+        if value is not None and (not isinstance(value, str) or not _TOPIC_SEGMENT_RE.fullmatch(value)):
+            raise ValueError(f"mqtt.{key} must be one topic level: letters, digits, '.', '_' or '-'")
+    if str(mq.get("base_topic") or "cams-record").lower().startswith("cams-detect"):
+        raise ValueError("mqtt.base_topic must not be cams-detect: those topics belong to cams-detect")
+    port = mq.get("port", 1883)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("mqtt.port must be a whole number from 1 to 65535")
+    for key in ("keepalive", "refresh_s"):
+        if key in mq:
+            _positive(f"mqtt.{key}", mq[key])
+    if "switch_on" in mq:
+        from zoneinfo import ZoneInfo
+
+        from .pauses import PauseError, resolve_until
+
+        try:
+            resolve_until(mq["switch_on"], 0.0, ZoneInfo("UTC"))
+        except PauseError as exc:
+            raise ValueError(f"mqtt.switch_on: {exc.detail}") from exc
 
 
 def load_config(config_dir: str | Path, env: dict | None = None) -> tuple[dict, dict[str, CameraConfig]]:
