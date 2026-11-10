@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Iterable
 
 from .config import CameraConfig, read_secret
@@ -355,21 +356,44 @@ class Database:
                     for r in cur.fetchall()]
         return self.run(q)
 
-    def detection_events_for_push(self, since: float, limit: int = 200) -> list[dict]:
+    def detection_events_for_push(self, since: float, limit: int = 200,
+                                  snapshot_wait_s: float = 0) -> list[dict]:
         """Recent cams_detect events that have not yet been claimed for Web Push.
 
         Production ``cams_detect.events`` has a BIGINT auto-increment ``id`` PK and the
         string event id (MQTT / API / push, e.g. ``1793897909-7de0b7``) in
         ``event_uid``; the score column is ``max_score`` (not ``score``). Push claims
         in ``push_sent_events.event_id`` are keyed by that uid.
+
+        Releases before the uid switch claimed events by the numeric PK, so an event whose
+        ``CAST(id AS CHAR)`` is already claimed is skipped too (no duplicate push on deploy).
+        cams_detect.events is ``utf8mb4_general_ci`` and push_sent_events
+        ``utf8mb4_unicode_ci``; both join keys are converted to the push table's collation
+        explicitly, otherwise MariaDB raises "Illegal mix of collations" (1267).
+
+        With ``snapshot_wait_s > 0`` an event whose ``snapshot_path`` is still NULL is held
+        until it started more than that many seconds ago, so the notification never
+        arrives before its snapshot can be served; snapshot-less events still notify.
         """
+        snap_clause = ""
+        params: list = [to_dt(since)]
+        if snapshot_wait_s and float(snapshot_wait_s) > 0:
+            snap_clause = "AND (e.snapshot_path IS NOT NULL OR e.start_ts <= %s)"
+            params.append(to_dt(time.time() - float(snapshot_wait_s)))
+        params.append(int(limit))
+
         def q(cur):
-            cur.execute("""SELECT e.event_uid, e.camera_id, e.label, e.max_score, e.start_ts, e.end_ts
+            cur.execute(f"""SELECT e.event_uid, e.camera_id, e.label, e.max_score, e.start_ts, e.end_ts
                            FROM cams_detect.events e
-                           LEFT JOIN push_sent_events s ON s.event_id = e.event_uid
-                           WHERE s.event_id IS NULL AND e.start_ts >= %s
+                           LEFT JOIN push_sent_events s
+                             ON s.event_id = CONVERT(e.event_uid USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                           LEFT JOIN push_sent_events legacy
+                             ON legacy.event_id = CONVERT(CAST(e.id AS CHAR) USING utf8mb4)
+                                                  COLLATE utf8mb4_unicode_ci
+                           WHERE s.event_id IS NULL AND legacy.event_id IS NULL AND e.start_ts >= %s
+                             {snap_clause}
                            ORDER BY e.start_ts ASC, e.id ASC LIMIT %s""",
-                        (to_dt(since), int(limit)))
+                        params)
             return [{"id": str(r[0]), "camera_id": r[1], "label": r[2],
                      "score": float(r[3]) if r[3] is not None else None,
                      "start_ts": from_dt(r[4]),
@@ -380,14 +404,24 @@ class Database:
     def detection_event_by_id(self, event_id: str) -> dict | None:
         """Look up one cams_detect event by its string uid (``events.event_uid``).
 
-        The returned ``id`` is the uid, never the numeric PK. ``has_snapshot`` /
+        Legacy deep links: releases before the uid switch sent pushes linking to
+        ``#event=<numeric PK>``, and those notifications are still on phones. When no
+        uid matches and ``event_id`` is all digits, the row with that numeric ``id`` is
+        returned instead, so the client opens the right event.
+
+        The returned ``id`` is always the uid, never the numeric PK. ``has_snapshot`` /
         ``has_snapshot_hires`` are true only when the path columns are non-NULL.
         """
+        cols = """SELECT event_uid, camera_id, label, max_score, start_ts, end_ts,
+                         snapshot_path, snapshot_hires FROM cams_detect.events"""
+        eid = str(event_id)
+
         def q(cur):
-            cur.execute("""SELECT event_uid, camera_id, label, max_score, start_ts, end_ts,
-                                  snapshot_path, snapshot_hires
-                           FROM cams_detect.events WHERE event_uid=%s""", (str(event_id),))
+            cur.execute(f"{cols} WHERE event_uid=%s", (eid,))
             r = cur.fetchone()
+            if not r and eid.isascii() and eid.isdigit():
+                cur.execute(f"{cols} WHERE id=%s", (int(eid),))
+                r = cur.fetchone()
             if not r:
                 return None
             return {"id": str(r[0]), "camera_id": r[1], "label": r[2],

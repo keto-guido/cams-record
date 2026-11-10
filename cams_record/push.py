@@ -401,7 +401,9 @@ class PushNotifier:
         labels = self.cfg.get("labels")
         label_set = {str(x).lower() for x in labels} if labels else None
         try:
-            events = self.db.detection_events_for_push(self.watermark - float(self.cfg.get("lookback_s", 120)))
+            events = self.db.detection_events_for_push(
+                self.watermark - float(self.cfg.get("lookback_s", 120)),
+                snapshot_wait_s=float(self.cfg.get("snapshot_wait_s", 5)))
         except Exception as exc:  # noqa: BLE001
             # Schema mismatches (unknown column) and missing grants both surface here —
             # log the actual error instead of always blaming SELECT grants.

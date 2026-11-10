@@ -172,6 +172,34 @@
     lbMsg = lb.querySelector('.cd-lb-msg'), lbSnap = lb.querySelector('.cd-dl-snap'), lbClip = lb.querySelector('.cd-dl-clip'), lbNote = lb.querySelector('.cd-lb-note'), lbHd = lb.querySelector('.cd-lb-hd');
   const lbSnapSave = saveJob(lbSnap, lbNote), lbClipSave = saveJob(lbClip, lbNote);
   let lbEv = null, lbTimer = null, lbLow = '', lbHigh = '', lbHiRes = false;
+  // Snapshot loading: on error retry once (cache-busted) after SNAP_RETRY ms, then try the other resolution if
+  // there is one, then say "Snapshot unavailable". Every attempt is tied to the event and load it was started for,
+  // so a late error or timer after the lightbox closed or moved to another event does nothing.
+  const SNAP_RETRY = 1500;
+  const lbSnapMsg = document.createElement('div');
+  lbSnapMsg.className = 'cd-lb-msg cd-lb-snapmsg'; lbSnapMsg.hidden = true; lbSnapMsg.textContent = 'Snapshot unavailable'; lbImg.after(lbSnapMsg);
+  let lbSnapGen = 0, lbSnapTimer = null, lbSnapFailed = false;
+  const snapBust = u => u + (u.includes('?') ? '&' : '?') + 'retry=' + Date.now();
+  // Show or hide the snapshot slot; once every load attempt failed, the message stands in for the image.
+  function lbImgShow(on) { lbImg.hidden = !on || lbSnapFailed; lbSnapMsg.hidden = !on || !lbSnapFailed; }
+  function lbSnapStop() { lbSnapGen++; clearTimeout(lbSnapTimer); lbSnapTimer = null; lbImg.onerror = null; lbSnapFailed = false; lbSnapMsg.hidden = true; }
+  function lbSnapLoad(e, url, alt) {
+    lbSnapStop();
+    const gen = lbSnapGen, live = () => lbEv === e && gen === lbSnapGen;
+    let step = 0;
+    lbImg.onerror = () => {
+      if (!live()) return;
+      if (step === 0) {
+        step = 1; clearTimeout(lbSnapTimer);
+        lbSnapTimer = setTimeout(() => { lbSnapTimer = null; if (live()) lbImg.src = snapBust(url); }, SNAP_RETRY);
+      } else if (step === 1 && alt && alt !== url) { step = 2; lbImg.src = alt; }
+      else {
+        step = 3; lbImg.onerror = null; lbImg.removeAttribute('src');
+        const shown = !lbImg.hidden; lbSnapFailed = true; lbImgShow(shown);
+      }
+    };
+    lbImg.src = url;
+  }
   const recCam = e => Object.keys(detOf).find(h => detOf[h] === e.camera) || e.camera;
   function win(e) {
     const s = e.start_ts - PRE; let t = (e.end_ts && e.end_ts > e.start_ts ? e.end_ts : e.start_ts + NOEND) + POST;
@@ -181,7 +209,7 @@
   const infoQ = e => { const [s, t] = win(e); return CR + '/api/clip/info?' + new URLSearchParams({ camera: recCam(e), start: s, end: t }); };
   const stOf = (j, q) => { const x = j && j[q]; return typeof x === 'string' ? x : (x && (x.status || x.state)) || (x && x.available ? 'available' : 'unknown'); };
   function lbClose() {
-    lb.hidden = true; clearTimeout(lbTimer); lbTimer = null; lbEv = null;
+    lb.hidden = true; clearTimeout(lbTimer); lbTimer = null; lbEv = null; lbSnapStop();
     lbV.pause(); lbV.removeAttribute('src'); lbV.load(); lbV.hidden = true; lbImg.removeAttribute('src');
     lbHiRes = false; lbHd.hidden = true; lbHd.setAttribute('aria-pressed', 'false');
     saveRelease(lbSnapSave); saveRelease(lbClipSave);
@@ -190,9 +218,10 @@
   const lbPlay = () => { const p = lbV.play(); if (p && p.catch) p.catch(() => {}); };
   // HD takes over from the clip while on; turning it off returns to the clip, or to the low-res snapshot if there is none.
   function lbHdSet(on) {
-    lbHiRes = on; lbHd.setAttribute('aria-pressed', String(on)); lbImg.src = on ? lbHigh : lbLow;
+    lbHiRes = on; lbHd.setAttribute('aria-pressed', String(on));
+    if (on) lbSnapLoad(lbEv, lbHigh, lbLow); else lbSnapLoad(lbEv, lbLow, lbHigh);
     const clip = !!lbV.getAttribute('src');
-    lbImg.hidden = clip && !on; lbV.hidden = !clip || on;
+    lbImgShow(!clip || on); lbV.hidden = !clip || on;
     if (clip) { if (on) lbV.pause(); else lbPlay(); }
   }
   function lbTry(e) {
@@ -203,7 +232,7 @@
       const armClip = q => saveArm(lbClipSave, { url: clipQ(e, q, 1), filename: recCam(e) + '_' + fileStamp(e.start_ts) + '_clip.mp4', type: 'video/mp4', keepServerName: true });
       if (main === 'available') { armClip('main'); lbNote.textContent = ''; }
       else if (sub === 'available') { armClip('sub'); lbNote.textContent = main === 'not_ready' ? '' : 'Full-res footage is no longer kept; the clip download is low-res.'; }
-      const play = q => { lbMsg.textContent = q === 'main' ? 'Low-res copy unavailable; playing full-res.' : ''; lbV.src = clipQ(e, q, 0); if (!lbHiRes) { lbImg.hidden = true; lbV.hidden = false; lbPlay(); } };
+      const play = q => { lbMsg.textContent = q === 'main' ? 'Low-res copy unavailable; playing full-res.' : ''; lbV.src = clipQ(e, q, 0); if (!lbHiRes) { lbImgShow(false); lbV.hidden = false; lbPlay(); } };
       if (sub === 'available') play('sub');
       else if (sub === 'not_ready' || main === 'not_ready') { lbMsg.textContent = 'Clip available in about a minute…'; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); }
       else if (main === 'available') play('main');
@@ -220,9 +249,9 @@
     lbInfo.textContent = label + ' · ' + name + ' · ' + fmt(e.start_ts);
     lbLow = e.has_snapshot ? low : high; lbHigh = e.has_snapshot && e.has_snapshot_hires ? high : ''; lbHd.hidden = !lbHigh;
     if (e.has_snapshot || e.has_snapshot_hires) {
-      lbImg.src = lbLow; lbImg.alt = label + ' at ' + name; lbImg.hidden = false;
+      lbImg.alt = label + ' at ' + name; lbSnapLoad(e, lbLow, lbHigh); lbImgShow(true);
       saveArm(lbSnapSave, { url: e.has_snapshot_hires ? high : low, filename: recCam(e) + '_' + fileStamp(e.start_ts) + '.jpg', type: 'image/jpeg' });
-    } else { lbImg.hidden = true; lbSnap.hidden = true; }
+    } else { lbImgShow(false); lbSnap.hidden = true; }
     lbClip.hidden = true; lbNote.textContent = ''; lbMsg.textContent = 'Loading clip…';
     lb.hidden = false; document.body.classList.add('cd-lb-open'); lb.querySelector('.cd-lb-x').focus();
     lbTry(e);
@@ -230,7 +259,7 @@
   lb.querySelector('.cd-lb-x').addEventListener('click', lbClose);
   lbHd.addEventListener('click', () => lbHdSet(!lbHiRes));
   lb.addEventListener('click', ev => { if (ev.target === lb) lbClose(); });
-  lbV.addEventListener('error', () => { if (lbEv && lbV.getAttribute('src')) { lbMsg.textContent = 'Clip failed to play. Retrying…'; lbV.removeAttribute('src'); lbV.hidden = true; lbImg.hidden = !lbImg.getAttribute('src'); clearTimeout(lbTimer); const e = lbEv; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); } });
+  lbV.addEventListener('error', () => { if (lbEv && lbV.getAttribute('src')) { lbMsg.textContent = 'Clip failed to play. Retrying…'; lbV.removeAttribute('src'); lbV.hidden = true; lbImgShow(!!lbImg.getAttribute('src') || lbSnapFailed); clearTimeout(lbTimer); const e = lbEv; lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY); } });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !lb.hidden) lbClose(); });
 
   // ---------- detections list (shared by the tab and the camera page) ----------
@@ -484,7 +513,9 @@
   for(const id of ['start','end'])$('tl-'+id).addEventListener('change',()=>{const current=id==='start'?rangeS:rangeE,d=new Date(current*1000),parts=$('tl-'+id).value.split(':').map(Number);if(parts.length<2)return;d.setHours(parts[0],parts[1],parts[2]||0,0);if(id==='start')rangeS=+d/1000;else rangeE=+d/1000;syncRange(id);});
   new ResizeObserver(()=>{if(tlCam)drawTimeline();}).observe(bar);
   document.addEventListener('visibilitychange',()=>{if(!visible()){v.pause();clearTimeout(loadTimer);}else if(tlCam){if(mode==='live'){center=Date.now()/1000;liveStart(tlCam);}refreshTimeline(true);drawTimeline();}});
+  // pagehide frees media for bfcache; pageshow(persisted) restores from route (tlCam was cleared).
   window.addEventListener('pagehide',timelineStop);
+  window.addEventListener('pageshow',ev=>{if(!ev.persisted||route.view!=='cam'||!route.id)return;timelineStart(route.id);liveStart(route.id);});
 
 
   // ---------- Web Push notification control ----------
@@ -626,6 +657,183 @@
   });
   refreshPushUi();
 
+  // ---------- phone alert pause (cams-record /api/push/pauses) ----------
+  // A pause silences one camera's phone notifications for everyone until it ends; recording, detections and Home
+  // Assistant carry on, and events from the pause are never sent later. Everyone who can see a camera sees its state;
+  // only its owners and admins get controls (cams-record enforces that, this only hides what would be refused).
+  const AP = CR_PUSH + '/pauses', AP_POLL = 30000, SVG = 'http://www.w3.org/2000/svg';
+  const ap = { ok: false, status: 0, tz: undefined, morning: 0, cams: {}, timer: 0, seq: 0, menuCam: null, anchor: null, busy: false };
+  const apMenu = $('ap-menu'), apToastEl = $('ap-toast'), camBell = $('cam-bell'), camPaused = $('cam-paused');
+  let apToastTimer = 0;
+  async function apJson(url, opts) {
+    const r = await fetch(url, { credentials: 'same-origin', ...opts, headers: { 'Content-Type': 'application/json', ...(opts && opts.headers) } });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(body.detail || ('Request failed (' + r.status + ')')); e.status = r.status; throw e; }
+    return body;
+  }
+  function bellSvg(off) {
+    const s = document.createElementNS(SVG, 'svg');
+    [['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '1.8'], ['stroke-linecap', 'round'], ['stroke-linejoin', 'round'], ['aria-hidden', 'true']].forEach(([k, v]) => s.setAttribute(k, v));
+    ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.94 1.94 0 0 0 3.4 0'].concat(off ? ['M3 3l18 18'] : []).forEach(d => { const p = document.createElementNS(SVG, 'path'); p.setAttribute('d', d); s.appendChild(p); });
+    return s;
+  }
+  // Times in the server's zone, which is also where "Until morning" (07:00) is defined.
+  function apTime(ts) {
+    const d = new Date(ts * 1000), day = { year: 'numeric', month: 'numeric', day: 'numeric' };
+    let tz = ap.tz;
+    try { d.toLocaleTimeString([], { timeZone: tz }); } catch (e) { tz = undefined; }
+    const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: tz });
+    const same = d.toLocaleDateString([], { ...day, timeZone: tz }) === new Date().toLocaleDateString([], { ...day, timeZone: tz });
+    return same ? t : d.toLocaleDateString([], { weekday: 'short', timeZone: tz }) + ' ' + t;
+  }
+  const apText = c => c && c.paused ? 'Paused until ' + apTime(c.until_ts) : 'Alerts on';
+  const apName = id => (ap.cams[id] && ap.cams[id].name) || (hubCams.find(c => c.id === id) || {}).name || id;
+  function apSay(text) {
+    if (route.view === 'cam') { toast(text); return; } // inside the player, so it also shows in full screen
+    apToastEl.textContent = text; apToastEl.hidden = false;
+    clearTimeout(apToastTimer); apToastTimer = setTimeout(() => { apToastEl.hidden = true; }, 3500);
+  }
+  function apBell(btn, c, name) {
+    const editable = !!(ap.ok && c && c.can_edit);
+    btn.hidden = !editable;
+    if (!editable) { if (ap.anchor === btn) apClose(false); return; }
+    btn.classList.toggle('on', !!c.paused);
+    btn.replaceChildren(bellSvg(!!c.paused));
+    if (btn === camBell && c.paused) { const t = document.createElement('span'); t.className = 'ap-bell-text'; t.textContent = apText(c); btn.appendChild(t); }
+    const label = c.paused ? 'Phone alerts for ' + name + ' paused until ' + apTime(c.until_ts) + '. Change' : 'Pause phone alerts for ' + name;
+    btn.setAttribute('aria-label', label); btn.title = label;
+  }
+  function apBadge(el, c) { const on = !!(ap.ok && c && c.paused); el.hidden = !on; el.textContent = on ? apText(c) : ''; }
+  // Tiles are <button>s, so the bell is a sibling in a positioned wrapper rather than nested inside one.
+  function apDecorate(t) {
+    if (t._ap) return t._ap;
+    const cell = document.createElement('div'); cell.className = 'camcell';
+    t.replaceWith(cell); cell.appendChild(t);
+    const bell = document.createElement('button'); bell.type = 'button'; bell.className = 'ap-bell'; bell.hidden = true;
+    bell.setAttribute('aria-haspopup', 'menu'); bell.setAttribute('aria-expanded', 'false'); bell.setAttribute('aria-controls', 'ap-menu');
+    bell.addEventListener('click', ev => { ev.stopPropagation(); apToggle(bell, t.dataset.id); });
+    const badge = document.createElement('span'); badge.className = 'ap-badge ap-badge-tile'; badge.hidden = true;
+    t.appendChild(badge); cell.appendChild(bell);
+    return (t._ap = { bell, badge });
+  }
+  const AP_ACTIONS = [['1h', '1 h', 'for 1 hour'], ['3h', '3 h', 'for 3 hours'], ['morning', 'Until morning', 'until morning'], ['resume', 'Resume', '']];
+  function apRow(c) {
+    const row = document.createElement('div'); row.className = 'ap-row' + (c.paused ? ' on' : '');
+    const head = document.createElement('div'); head.className = 'ap-row-head';
+    const name = document.createElement(hubCams.some(h => h.id === c.camera_id) ? 'a' : 'span'); name.className = 'ap-row-name'; name.textContent = c.name;
+    if (name.tagName === 'A') name.href = '#cam=' + encodeURIComponent(c.camera_id);
+    const st = document.createElement('span'); st.className = 'ap-row-state'; st.textContent = apText(c);
+    head.append(bellSvg(!!c.paused), name, st); row.appendChild(head);
+    if (!c.can_edit) {
+      const p = document.createElement('p'); p.className = 'muted sm'; p.textContent = "Only this camera's owners or an admin can change this."; row.appendChild(p);
+      return row;
+    }
+    const g = document.createElement('div'); g.className = 'ap-actions'; g.setAttribute('role', 'group'); g.setAttribute('aria-label', 'Phone alerts for ' + c.name);
+    AP_ACTIONS.forEach(([d, label, spoken]) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'ghost'; b.textContent = label; b.dataset.cam = c.camera_id; b.dataset.d = d;
+      if (d === 'resume') { b.disabled = !c.paused; b.setAttribute('aria-label', 'Resume phone alerts for ' + c.name); }
+      else { b.setAttribute('aria-pressed', String(!!c.paused && c.mode === d)); b.setAttribute('aria-label', 'Pause phone alerts for ' + c.name + ' ' + spoken); }
+      b.addEventListener('click', () => apSet(c.camera_id, d));
+      g.appendChild(b);
+    });
+    row.appendChild(g);
+    return row;
+  }
+  function apRenderList() {
+    const list = $('ap-list'), status = $('ap-status'), a = document.activeElement;
+    const focus = a && list.contains(a) && a.dataset.cam ? [a.dataset.cam, a.dataset.d] : null;
+    if (!ap.ok) {
+      status.textContent = ap.status === 404 ? 'Pausing alerts is not available on this server yet.'
+        : ap.status === 503 ? 'Pausing alerts is unavailable right now. Try again shortly.'
+        : ap.status ? 'Could not load alert pauses.' : 'Loading…';
+      list.replaceChildren(); return;
+    }
+    const cams = Object.values(ap.cams);
+    status.textContent = cams.length ? '“Until morning” ends at ' + apTime(ap.morning) + '.' : 'No cameras.';
+    list.replaceChildren(...cams.map(apRow));
+    if (focus) { // re-rendering must not drop keyboard focus
+      const same = [...list.querySelectorAll('button')].filter(b => b.dataset.cam === focus[0]);
+      const b = same.find(x => x.dataset.d === focus[1] && !x.disabled) || same.find(x => !x.disabled);
+      if (b) b.focus();
+    }
+  }
+  function apRender() {
+    tiles.forEach(t => { const d = apDecorate(t), c = ap.cams[t.dataset.id]; apBell(d.bell, c, t.dataset.name); apBadge(d.badge, c); });
+    const cur = route.view === 'cam' ? ap.cams[route.id] : null;
+    apBell(camBell, cur, route.id ? apName(route.id) : ''); apBadge(camPaused, cur);
+    if (ap.menuCam) apMenuItems(ap.cams[ap.menuCam]);
+    if (route.view === 'alerts') apRenderList();
+  }
+  // Re-read every 30 s while visible, and right after the next pause ends so badges clear on time.
+  function apSchedule() {
+    clearTimeout(ap.timer); ap.timer = 0;
+    if (!visible() || !ap.ok) return;
+    const now = Date.now() / 1000, next = Math.min(...Object.values(ap.cams).filter(c => c.paused).map(c => c.until_ts));
+    ap.timer = setTimeout(apLoad, Math.max(1000, Math.min(AP_POLL, isFinite(next) ? (next - now) * 1000 + 1000 : AP_POLL)));
+  }
+  async function apLoad() {
+    const seq = ++ap.seq;
+    try {
+      const j = await apJson(AP);
+      if (seq !== ap.seq) return;
+      Object.assign(ap, { ok: true, status: 200, tz: j.timezone, morning: j.morning_ts, cams: Object.fromEntries((j.cameras || []).map(c => [c.camera_id, c])) });
+    } catch (e) {
+      if (seq !== ap.seq) return;
+      Object.assign(ap, { ok: false, status: e.status || -1, cams: {} });
+    }
+    apRender(); apSchedule();
+  }
+  async function apSet(cam, d) {
+    const c = ap.cams[cam];
+    if (!c || !c.can_edit || ap.busy) return;
+    apClose(); ap.busy = true; ap.seq++; // a poll already in flight must not overwrite this answer
+    const url = AP + '/' + encodeURIComponent(cam);
+    try {
+      const j = d === 'resume' ? await apJson(url, { method: 'DELETE' }) : await apJson(url, { method: 'PUT', body: JSON.stringify({ duration: d }) });
+      ap.cams[cam] = j; apRender();
+      apSay(c.name + ': ' + (j.paused ? 'phone alerts paused until ' + apTime(j.until_ts) : 'phone alerts on'));
+    } catch (e) { apSay(e.message || 'Could not change alerts.'); }
+    finally { ap.busy = false; apLoad(); }
+  }
+  // ---- one menu shared by every bell: 1 h / 3 h / Until morning / Resume ----
+  const apItems = () => [...apMenu.querySelectorAll('[role="menuitem"]')].filter(b => !b.hidden);
+  function apMenuItems(c) {
+    apMenu.querySelectorAll('[role="menuitem"]').forEach(b => {
+      if (b.dataset.d === 'resume') b.hidden = !(c && c.paused);
+      if (b.dataset.d === 'morning') b.title = 'Until ' + apTime(ap.morning);
+      b.classList.toggle('on', !!(c && c.paused && c.mode === b.dataset.d));
+    });
+  }
+  function apOpen(anchor, cam) {
+    const c = ap.cams[cam];
+    if (!c || !c.can_edit) return;
+    ap.menuCam = cam; ap.anchor = anchor;
+    anchor.parentElement.appendChild(apMenu); // inside the player, so it stays visible in full screen
+    apMenu.classList.toggle('ap-menu-player', anchor === camBell);
+    apMenu.setAttribute('aria-label', 'Pause phone alerts for ' + c.name);
+    apMenuItems(c); apMenu.hidden = false; anchor.setAttribute('aria-expanded', 'true');
+    (apItems()[0] || apMenu).focus();
+  }
+  function apClose(refocus = true) {
+    if (apMenu.hidden) return;
+    apMenu.hidden = true;
+    const a = ap.anchor; ap.anchor = null; ap.menuCam = null;
+    if (a) { a.setAttribute('aria-expanded', 'false'); if (refocus && !a.hidden) a.focus(); }
+  }
+  function apToggle(anchor, cam) { if (!apMenu.hidden && ap.anchor === anchor) apClose(); else { apClose(false); apOpen(anchor, cam); } }
+  apMenu.addEventListener('click', ev => { const b = ev.target.closest('[role="menuitem"]'); if (b && ap.menuCam) apSet(ap.menuCam, b.dataset.d); });
+  apMenu.addEventListener('keydown', ev => {
+    const items = apItems(), i = items.indexOf(document.activeElement);
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); apClose(); }
+    else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); items[(i + (ev.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus(); }
+    else if (ev.key === 'Home' || ev.key === 'End') { ev.preventDefault(); items[ev.key === 'Home' ? 0 : items.length - 1].focus(); }
+    else if (ev.key === 'Tab') apClose(false);
+  });
+  document.addEventListener('pointerdown', ev => { if (!apMenu.hidden && !apMenu.contains(ev.target) && !(ap.anchor && ap.anchor.contains(ev.target))) apClose(false); });
+  camBell.addEventListener('click', () => { if (route.view === 'cam') apToggle(camBell, route.id); });
+  document.addEventListener('visibilitychange', () => { if (visible()) apLoad(); else { clearTimeout(ap.timer); ap.timer = 0; } });
+  apLoad();
+
   // ---------- deep-link: #event=<id> opens the authorized detection lightbox ----------
   // Production event ids are strings (e.g. "1793897909-7de0b7"), not integers.
   let openingEvent = null;
@@ -637,6 +845,7 @@
       let ev = null;
       try {
         const ctx = await pushJson(CR_PUSH + '/event-context/' + encodeURIComponent(eid));
+          // cams-record reports what cams-detect actually stored; missing flags mean no snapshot.
         ev = {
           id: ctx.id,
           camera: ctx.camera_id || ctx.camera,
@@ -645,8 +854,8 @@
           score: ctx.score,
           start_ts: ctx.start_ts,
           end_ts: ctx.end_ts,
-          has_snapshot: true,
-          has_snapshot_hires: true,
+          has_snapshot: !!ctx.has_snapshot,
+          has_snapshot_hires: !!ctx.has_snapshot_hires,
         };
       } catch (e) {
         const list = await fetch(CD + '/api/events?limit=50', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []);
@@ -663,12 +872,13 @@
   // ---------- camera management (Admin tab; admins only, enforced by cams-record) ----------
   // Camera objects live in cams_config (docs/camera-model.md). Every write sends the revision the view
   // was loaded at; a newer change elsewhere answers 409 and nothing is overwritten.
+  // Audio settings are a separate cams-audio service (see static/camera_audio.js), not cams_config.
   const ADM = CR + '/api/admin', PURPOSES = [
     ['live', 'Live view'], ['live_hd', 'Live view (HD)'], ['detect', 'Detection'],
     ['verify', 'Checking detections'], ['snapshot', 'Snapshots'],
   ];
-  const STREAM_LABEL = { main: 'Main (high res)', sub: 'Sub (low res)', snap: 'Snapshot' }, STREAM_SHORT = { main: 'Main', sub: 'Sub', snap: 'Snapshot' };
-  const adm = { ok: false, revision: 0, editable: false, mode: 'file', cameras: [], current: null, streams: null };
+  const STREAM_LABEL = { main: 'HD (main)', sub: 'Low-res (sub)', snap: 'Snapshot' }, STREAM_SHORT = { main: 'HD', sub: 'Low-res', snap: 'Snapshot' };
+  const adm = { ok: false, revision: 0, editable: false, mode: 'file', cameras: [], current: null, streams: null, audioPanel: null };
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   async function admJson(url, opts) {
     const r = await fetch(url, { credentials: 'same-origin', ...opts, headers: { 'Content-Type': 'application/json', ...(opts && opts.headers) } });
@@ -678,6 +888,14 @@
   }
   const names = s => s.split(',').map(x => x.trim()).filter(Boolean);
   const slug = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '');
+  function streamGo2rtc(cam, key) {
+    const s = cam && cam.streams && cam.streams[key];
+    return s && s.go2rtc_name ? s.go2rtc_name : null;
+  }
+  // One camera object: low-res (sub) and HD (main) are properties. Never invent *-main as its own row.
+  function presentCamera(cam) {
+    return { ...cam, streams_view: { sub: streamGo2rtc(cam, 'sub'), hd: streamGo2rtc(cam, 'main'), snap: streamGo2rtc(cam, 'snap') } };
+  }
   function defaultUse(keys) {
     const low = keys.includes('sub') ? 'sub' : (keys.includes('main') ? 'main' : null);
     const high = keys.includes('main') ? 'main' : low, out = {};
@@ -688,8 +906,13 @@
   }
   function visibilityText(c) {
     if (c.visibility === 'everyone') return 'Everyone';
-    const who = [...c.users, ...c.roles.map(r => r + ' (role)')];
+    const who = [...(c.users || []), ...(c.roles || []).map(r => r + ' (role)')];
     return who.length ? 'Only ' + who.join(', ') : 'Admins only';
+  }
+  function detectionText(c) {
+    const det = c.detection;
+    if (!det || !((c.use && c.use.detect) || []).length) return 'No detection';
+    return det.enabled === false ? 'Detection off' : 'Detection on';
   }
   async function admCheck() {
     // The tab appears only for admins: everyone else gets 401/403 from cams-record.
@@ -700,7 +923,7 @@
   async function admLoad() {
     const b = await admJson(ADM + '/cameras');
     Object.assign(adm, { ok: true, error: null, revision: b.revision, editable: b.editable, mode: b.mode,
-      cameras: b.cameras, source: b.camera_source });
+      cameras: (b.cameras || []).map(presentCamera), source: b.camera_source });
     return b;
   }
   async function admDetectReport() {
@@ -727,6 +950,9 @@
     if (src.error) line('Database: ' + src.error, 'adm-warn');
     b.hidden = false;
   }
+  function streamChip(label, name) {
+    const wrap = el('span'); wrap.appendChild(el('b', null, label)); wrap.appendChild(document.createTextNode(name || '—')); return wrap;
+  }
   async function admShowList() {
     $('adm-list').textContent = ''; $('adm-list').appendChild(el('p', 'muted sm', 'Loading…'));
     let detect = null;
@@ -739,17 +965,24 @@
     if (!adm.cameras.length) { list.appendChild(el('p', 'muted', 'No cameras in the camera settings database yet.')); return; }
     adm.cameras.forEach(c => {
       const row = el('a', 'adm-row'); row.href = '#admin=' + encodeURIComponent(c.id);
+      row.dataset.camId = c.id;
       const main = el('div', 'adm-row-main');
-      main.appendChild(el('strong', null, c.name)); main.appendChild(el('span', 'muted sm', c.id));
+      main.appendChild(el('strong', null, c.name));
+      main.appendChild(el('span', 'muted sm', c.id));
+      const streams = el('div', 'adm-row-streams');
+      streams.appendChild(streamChip('Low-res ', (c.streams_view && c.streams_view.sub) || '—'));
+      streams.appendChild(streamChip('HD ', (c.streams_view && c.streams_view.hd) || '—'));
+      main.appendChild(streams);
       row.appendChild(main);
       const chips = el('div', 'adm-chips');
       chips.appendChild(el('span', 'adm-chip' + (c.enabled ? ' on' : ''), c.enabled ? 'On' : 'Off'));
       chips.appendChild(el('span', 'adm-chip', visibilityText(c)));
-      const rec = c.use.record || [];
-      chips.appendChild(el('span', 'adm-chip', rec.length ? 'Records ' + rec.join(' + ') : 'Not recorded'));
-      const det = c.detection;
-      chips.appendChild(el('span', 'adm-chip', !det || !(c.use.detect || []).length ? 'No detection' : det.enabled === false ? 'Detection off' : 'Detection on'));
-      Object.entries(c.recording_state || {}).forEach(([q, st]) => { if (st && st !== 'recording') chips.appendChild(el('span', 'adm-chip warn', q + ': ' + st)); });
+      const rec = (c.use && c.use.record) || [];
+      chips.appendChild(el('span', 'adm-chip', rec.length ? 'Records ' + rec.map(k => k === 'main' ? 'HD' : 'low-res').join(' + ') : 'Not recorded'));
+      chips.appendChild(el('span', 'adm-chip', detectionText(c)));
+      Object.entries(c.recording_state || {}).forEach(([q, st]) => {
+        if (st && st !== 'recording') chips.appendChild(el('span', 'adm-chip warn', (q === 'main' ? 'HD' : q === 'sub' ? 'low-res' : q) + ': ' + st));
+      });
       row.appendChild(chips);
       list.appendChild(row);
     });
@@ -784,6 +1017,22 @@
   }
   function whoToggle() { $('f-who').hidden = !$('f-vis-restricted').checked; }
   function admMsg(text, cls) { const m = $('adm-msg'); m.textContent = text || ''; m.className = 'adm-msg' + (cls ? ' ' + cls : ''); }
+  function admMountAudio(cameraId) {
+    if (adm.audioPanel) { adm.audioPanel.destroy(); adm.audioPanel = null; }
+    const host = $('f-audio-panel');
+    if (!host) return;
+    host.textContent = '';
+    if (!cameraId || typeof CamsAudio === 'undefined' || !CamsAudio.mount) {
+      if (cameraId) {
+        const fs = el('fieldset', 'adm-audio is-disabled');
+        fs.appendChild(el('legend', null, 'Audio'));
+        fs.appendChild(el('p', 'muted sm', 'Audio service not installed'));
+        host.appendChild(fs);
+      }
+      return;
+    }
+    adm.audioPanel = CamsAudio.mount(host, { cameraId, editable: adm.editable, basePath: '/cams-audio' });
+  }
   async function admLoadStreams() {
     if (adm.streams) return;
     try {
@@ -795,11 +1044,13 @@
   }
   async function admShowEdit(id) {
     admMsg(''); $('adm-history').textContent = ''; $('adm-form').hidden = true;
+    if (adm.audioPanel) { adm.audioPanel.destroy(); adm.audioPanel = null; }
+    $('f-audio-panel').textContent = '';
     $('adm-title').textContent = id ? 'Loading…' : 'Add camera';
     let cam, history = [];
     try {
-      if (id) { const b = await admJson(ADM + '/cameras/' + encodeURIComponent(id)); Object.assign(adm, { revision: b.revision, editable: b.editable, mode: b.mode }); cam = b.camera; history = b.history; }
-      else { await admLoad(); cam = { id: '', name: '', enabled: true, visibility: 'restricted', users: [], roles: [], streams: {}, use: {}, detection: { enabled: true }, recording: null }; }
+      if (id) { const b = await admJson(ADM + '/cameras/' + encodeURIComponent(id)); Object.assign(adm, { revision: b.revision, editable: b.editable, mode: b.mode }); cam = presentCamera(b.camera); history = b.history; }
+      else { await admLoad(); cam = presentCamera({ id: '', name: '', enabled: true, visibility: 'restricted', users: [], roles: [], streams: {}, use: {}, detection: { enabled: true }, recording: null }); }
     } catch (e) { $('adm-title').textContent = id || 'Add camera'; admMsg(e.status === 404 ? 'This camera no longer exists.' : e.message, 'err'); return; }
     if (route.view !== 'admin-edit' || (route.id || null) !== (id || null)) return;
     adm.current = cam;
@@ -809,11 +1060,21 @@
     ['main', 'sub', 'snap'].forEach(k => { F(k).value = (cam.streams[k] && cam.streams[k].go2rtc_name) || ''; });
     renderUse(id ? cam.use : defaultUse(streamKeys()));
     $('f-vis-' + (cam.visibility === 'everyone' ? 'everyone' : 'restricted')).checked = true; whoToggle();
-    F('users').value = cam.users.join(', '); F('roles').value = cam.roles.join(', ');
+    F('users').value = (cam.users || []).join(', '); F('roles').value = (cam.roles || []).join(', ');
     F('detect').checked = !!cam.detection && cam.detection.enabled !== false;
-    F('masks').href = '/cams-detect/masks?camera=' + encodeURIComponent(cam.id); F('masks-row').hidden = !id || !cam.detection;
+    const detOn = !!cam.detection && cam.detection.enabled !== false;
+    $('f-detect-status').textContent = !cam.detection ? 'Detection is not set up for this camera yet.'
+      : detOn ? 'Detection is on. Masks and zones are edited below.' : 'Detection is off for this camera.';
+    F('masks').href = '/cams-detect/masks?camera=' + encodeURIComponent(cam.id);
+    const hasDet = !!(id && cam.detection);
+    $('f-masks-row').hidden = !hasDet; $('f-masks-none').hidden = hasDet;
     F('main-days').value = (cam.recording && cam.recording.main_days) || ''; F('sub-days').value = (cam.recording && cam.recording.sub_days) || '';
-    $('adm-form').querySelectorAll('input').forEach(i => { if (i.id !== 'f-id' || !id) i.disabled = !adm.editable; });
+    $('adm-form').querySelectorAll('input, select').forEach(i => {
+      if (i.id === 'f-audio-stream') return;
+      if (i.id === 'f-id' && id) return;
+      if (i.id && i.id.indexOf('f-audio-') === 0) return;
+      i.disabled = !adm.editable;
+    });
     $('adm-save').hidden = !adm.editable; $('adm-delete').hidden = !adm.editable || !id; $('f-defaults').hidden = !adm.editable;
     if (!adm.editable) admMsg('Read-only while camera_source is file.');
     $('adm-form').hidden = false;
@@ -826,6 +1087,7 @@
       $('adm-history').appendChild(li);
     });
     admLoadStreams();
+    admMountAudio(id || null);
   }
   function admForm() {
     const streams = {};
@@ -877,9 +1139,10 @@
   $('f-vis-everyone').addEventListener('change', whoToggle); $('f-vis-restricted').addEventListener('change', whoToggle);
   function admShow() {
     if (route.view === 'admin') {
+      if (adm.audioPanel) { adm.audioPanel.destroy(); adm.audioPanel = null; }
       const flash = sessionStorage.getItem('cams-adm-flash'); sessionStorage.removeItem('cams-adm-flash');
       admShowList().then(() => { if (flash && route.view === 'admin') { const b = $('adm-banner'); b.insertBefore(el('p', 'adm-ok', flash), b.firstChild); b.hidden = false; } });
-      document.title = 'Camera management · Cameras · MERSINO NETWORK';
+      document.title = 'Cameras · Admin · MERSINO NETWORK';
     } else if (route.view === 'admin-edit') {
       F('id').dataset.touched = ''; admShowEdit(route.id);
       document.title = (route.id ? 'Edit camera' : 'Add camera') + ' · Cameras · MERSINO NETWORK';
@@ -895,7 +1158,9 @@
     const ev = h.match(/^event=([^&]+)$/);
     if (ev) return { view: 'event', eventId: ev[1] };
     if (h === 'detections') return { view: 'det' };
-    const m = h.match(/^cam=([a-z0-9][a-z0-9-]{0,31})$/);
+    if (h === 'alerts') return { view: 'alerts' }; // App Hub's menu links here
+    // Same id contract as camera-access.js / Admin (1–64): [a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?
+    const m = h.match(/^cam=([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/);
     if (m && hubCams.some(c => c.id === m[1])) return { view: 'cam', id: m[1] };
     return { view: 'grid' };
   }
@@ -908,8 +1173,9 @@
     }
     if (prev.view === 'cam' && (route.view !== 'cam' || route.id !== prev.id)) { liveStop(); timelineStop(); }
     if ((route.view === 'admin' || route.view === 'admin-edit') && !adm.ok) route = { view: 'grid' };  // not (yet) known to be an admin
-    $('view-grid').hidden = route.view !== 'grid'; $('view-det').hidden = route.view !== 'det'; $('view-cam').hidden = route.view !== 'cam';
+    $('view-grid').hidden = route.view !== 'grid'; $('view-det').hidden = route.view !== 'det'; $('view-cam').hidden = route.view !== 'cam'; $('view-alerts').hidden = route.view !== 'alerts';
     $('view-admin').hidden = route.view !== 'admin'; $('view-admin-edit').hidden = route.view !== 'admin-edit';
+    apClose(false); apRender(); if (route.view === 'alerts' && prev.view !== 'alerts') apLoad();
     $('cams-tabs').hidden = route.view === 'cam' || route.view === 'admin-edit';
     const tabView = route.view === 'admin-edit' ? 'admin' : route.view;
     document.querySelectorAll('.cams-tab').forEach(a => a.setAttribute('aria-current', a.dataset.view === tabView ? 'page' : 'false'));
@@ -930,7 +1196,7 @@
         if (!camDet) { $('cam-off').hidden = false; $('cam-list').innerHTML = ''; return; }
         camList.reset(); evStart(camList);
       });
-    } else if (route.view !== 'admin' && route.view !== 'admin-edit') document.title = 'Cameras · MERSINO NETWORK';
+    } else if (route.view !== 'admin' && route.view !== 'admin-edit') document.title = (route.view === 'alerts' ? 'Alerts · ' : '') + 'Cameras · MERSINO NETWORK';
   }
   tiles.forEach(t => t.addEventListener('click', () => { sessionStorage.setItem('cams-in-app', '1'); location.hash = 'cam=' + t.dataset.id; }));
   document.querySelectorAll('.cams-tab').forEach(a => a.addEventListener('click', () => sessionStorage.setItem('cams-in-app', '1')));

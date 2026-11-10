@@ -54,7 +54,7 @@ def test_node_twin_passes_same_vectors():
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
-    for script in ("test_camera_access.js", "test_cams_page.js"):
+    for script in ("test_camera_access.js", "test_cams_page.js", "test_camera_streams.js", "test_camera_audio.js"):
         done = subprocess.run([node, str(ROOT / "apphub" / script)], capture_output=True, text=True, timeout=60)
         assert done.returncode == 0, done.stdout + done.stderr
 
