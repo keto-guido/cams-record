@@ -93,17 +93,38 @@ def test_unknown_users_denied():
     assert not access.can_view_camera("missing", Viewer("root", ("admin",)))
 
 
-def test_malformed_rows_admin_only_never_open():
+def test_parity_malformed_grant_ignored_valid_still_apply():
+    """(a) A malformed grant entry is skipped; sibling valid grants still apply."""
+    cam = _obj("private", visibility="restricted", users=("ann",))
+    cam.users = [None, "ann", "", 3]  # only "ann" counts
+    access = _access({"private": cam})
+    assert access.can_view_camera("private", Viewer("ann", ("cams",)))
+    assert not access.can_view_camera("private", Viewer("bob", ("cams",)))
+
+
+def test_parity_everyone_before_bad_grants():
+    """(b) visibility everyone is checked first: bad grant rows cannot close an open camera."""
+    cam = _obj("open", visibility="everyone")
+    cam.users = [None, ""]  # would be poison if grants were consulted first
+    cam.roles = "not-a-list"
+    access = _access({"open": cam})
+    assert access.can_view_camera("open", Viewer("bob", ("cams",)))
+    assert can_view_config(cam, "bob", ("cams",))
+
+
+def test_malformed_visibility_admin_only():
     bad_vis = _obj("bad-vis", visibility="open")  # not everyone/restricted
-    bad_users = _obj("bad-users", visibility="restricted")
-    bad_users.users = [None, "ann"]  # malformed principals
+    access = _access({"bad-vis": bad_vis})
+    assert access.can_view_camera("bad-vis", Viewer("root", ("admin",)))
+    assert not access.can_view_camera("bad-vis", Viewer("ann", ("cams",)))
+
+
+def test_wholly_unusable_grant_field_on_restricted_is_admin_only():
     bad_roles = _obj("bad-roles", visibility="restricted")
-    bad_roles.roles = "family"  # string instead of list
-    access = _access({"bad-vis": bad_vis, "bad-users": bad_users, "bad-roles": bad_roles})
-    for cid in ("bad-vis", "bad-users", "bad-roles"):
-        assert access.can_view_camera(cid, Viewer("root", ("admin",)))
-        assert not access.can_view_camera(cid, Viewer("ann", ("cams",)))
-        assert not access.can_view_camera(cid, Viewer("ann", ("family",)))
+    bad_roles.roles = "family"  # string instead of list → no grants
+    access = _access({"bad-roles": bad_roles})
+    assert access.can_view_camera("bad-roles", Viewer("root", ("admin",)))
+    assert not access.can_view_camera("bad-roles", Viewer("ann", ("family",)))
 
 
 def test_disabled_cameras_hidden():

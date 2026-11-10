@@ -50,27 +50,35 @@ class CameraSource:
         if cached is None:
             return False
         rev, cams, saved_at = cached
-        # ACL freshness uses the cache's saved_at (not "now"), so a stale file fails closed promptly.
+        # ACL freshness uses the cache's saved_at only. Missing saved_at is already stale (not "now").
         with self.lock:
             self.revision, self.cameras, self.origin = rev, cams, "cache"
-            self.loaded_at = float(saved_at) if saved_at else time.time()
+            self.loaded_at = float(saved_at) if saved_at is not None else None
+            self.last_ok_at = None
         log.warning("cams_config: database unreachable, using cached camera objects (revision %s, %d cameras)",
                     rev, len(cams))
         return True
 
     def poll(self) -> bool:
-        """Reload if the revision changed (or we are running on the cache). True when cameras changed."""
+        """Reload if the revision changed (or we are running on the cache). True when cameras changed.
+
+        ``last_ok_at`` is set only after a full ``_load_db()`` succeeds, or when the revision query
+        confirms the same revision as an already fully loaded DB snapshot. A successful revision
+        probe alone must not refresh ACL freshness — otherwise a load failure after a revocation
+        would keep revoked grants alive forever.
+        """
         try:
             rev = self.store.revision()
         except Exception as exc:  # noqa: BLE001
             self._failed(exc)
             return False
-        self.last_ok_at = time.time()
         if self._error_logged:
             log.info("cams_config: database reachable again")
             self._error_logged = False
         self.last_error = ""
         if rev == self.revision and self.origin == "db":
+            # Same revision as a fully loaded DB snapshot: refresh ACL freshness without reloading.
+            self.last_ok_at = time.time()
             return False
         # First successful load from an uninitialized source must apply even when the DB is empty,
         # so db mode can drop the cameras.yaml fallback.
@@ -87,12 +95,13 @@ class CameraSource:
         return before != {k: c.to_dict() for k, c in self.cameras.items()}
 
     def _load_db(self) -> None:
+        """Load camera objects from the database. Sets last_ok_at / cache saved_at only on full success."""
         rev, cams = self.store.load_all()
         now = time.time()
         with self.lock:
             self.revision, self.cameras, self.origin, self.loaded_at = rev, cams, "db", now
             self.last_ok_at, self.last_error = now, ""
-        self._write_cache(rev, cams)
+        self._write_cache(rev, cams, saved_at=now)
 
     def _failed(self, exc: Exception) -> None:
         self.last_error = f"{exc.__class__.__name__}: {exc}"[:300]
@@ -102,10 +111,12 @@ class CameraSource:
             self._error_logged = True
 
     # -- cache ------------------------------------------------------------------
-    def _write_cache(self, rev: int, cams: dict[str, CameraObject]) -> None:
+    def _write_cache(self, rev: int, cams: dict[str, CameraObject], *, saved_at: float | None = None) -> None:
         if self.cache_file is None:
             return
-        data = {"revision": rev, "saved_at": time.time(), "cameras": {k: c.to_dict() for k, c in cams.items()}}
+        # saved_at is the successful full-load time (same clock as last_ok_at), never a revision probe.
+        data = {"revision": rev, "saved_at": float(saved_at if saved_at is not None else time.time()),
+                "cameras": {k: c.to_dict() for k, c in cams.items()}}
         try:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self.cache_file.parent), prefix=".camconfig.", suffix=".json")

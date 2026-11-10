@@ -29,6 +29,17 @@ def _unj(value):
     return None if value is None else json.loads(value)
 
 
+def access_grant_target(kind, principal) -> str | None:
+    """Where a camera_access row goes: ``users``, ``roles``, or None to ignore (fail closed)."""
+    if not isinstance(principal, str) or not principal:
+        return None
+    if kind == "user":
+        return "users"
+    if kind == "role":
+        return "roles"
+    return None
+
+
 class CamConfigStore:
     def __init__(self, db: Database):
         self.db = db
@@ -206,9 +217,14 @@ def _read_all(cur) -> tuple[int, dict[str, CameraObject]]:
         cams[cid].use[purpose] = (*cams[cid].use.get(purpose, ()), key)
     users: dict[str, list[str]] = {}
     roles: dict[str, list[str]] = {}
+    buckets = {"users": users, "roles": roles}
     cur.execute("SELECT camera_id, kind, principal FROM camera_access ORDER BY principal")
     for cid, kind, principal in cur.fetchall():
-        (users if kind == "user" else roles).setdefault(cid, []).append(principal)
+        # Accept only 'user' / 'role'. Unknown kinds are ignored (never treated as roles).
+        target = access_grant_target(kind, principal)
+        if target is None or cid not in cams:
+            continue
+        buckets[target].setdefault(cid, []).append(principal)
     for cid, cam in cams.items():
         cam.users, cam.roles = tuple(users.get(cid, ())), tuple(roles.get(cid, ()))
     cur.execute("SELECT camera_id, settings_json FROM camera_detection")

@@ -102,18 +102,13 @@ def can_stream(cameras: dict[str, Camera], name: str, user: str, roles) -> bool:
     return bool(owners) and all(can_access(c, user, roles) for c in owners)
 
 
-def _principals(value) -> frozenset[str] | None:
-    """Non-empty string principals; None when the field is malformed (admin-only, never open)."""
+def _principals(value) -> frozenset[str]:
+    """Valid non-empty string principals. Each malformed entry is skipped on its own (parity with apphub)."""
     if value is None:
         return frozenset()
     if isinstance(value, str) or not isinstance(value, (tuple, list, set, frozenset)):
-        return None
-    out = []
-    for item in value:
-        if not isinstance(item, str) or not item:
-            return None
-        out.append(item)
-    return frozenset(out)
+        return frozenset()  # wholly unusable field → no grants
+    return frozenset(item for item in value if isinstance(item, str) and item)
 
 
 def can_view_config(cam, user: str, roles) -> bool:
@@ -122,9 +117,10 @@ def can_view_config(cam, user: str, roles) -> bool:
     - empty user: deny
     - disabled / missing: deny (including admin)
     - role ``admin``: allow every enabled camera
-    - ``visibility: everyone``: any cams user
+    - ``visibility: everyone``: any cams user (checked before grants; bad grant rows cannot close it)
     - ``visibility: restricted``: granted users/roles; empty grants are admin-only
-    - malformed visibility or grant lists: admin-only (never open)
+    - a malformed grant entry is ignored; sibling valid grants still apply
+    - malformed visibility: admin-only (never open)
     """
     if cam is None or not user:
         return False
@@ -133,12 +129,11 @@ def can_view_config(cam, user: str, roles) -> bool:
     if ADMIN_ROLE in roles:
         return True
     visibility = getattr(cam, "visibility", None)
-    users, role_grants = _principals(getattr(cam, "users", ())), _principals(getattr(cam, "roles", ()))
-    if users is None or role_grants is None:
-        return False  # malformed grants: admin-only
+    # everyone first: a bad grant row must not close an open camera.
     if visibility == "everyone":
         return True
     if visibility == "restricted":
+        users, role_grants = _principals(getattr(cam, "users", ())), _principals(getattr(cam, "roles", ()))
         return user in users or bool(role_grants.intersection(roles))
     return False  # unknown / malformed visibility: admin-only
 

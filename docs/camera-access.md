@@ -135,14 +135,18 @@ access from cams_config camera objects instead of `cams.json` (file and shadow m
 
 - Only **enabled** cameras are visible (disabled are hidden from everyone, including admin).
 - Role `admin` sees every enabled camera.
-- `visibility: everyone`: any cams user.
+- `visibility: everyone`: any cams user (checked before grants; a bad grant row cannot close it).
 - `visibility: restricted`: granted users and roles; with no grants, admin-only.
-- Malformed visibility or grant lists are admin-only (never open).
+- A malformed grant entry is ignored on its own; sibling valid grants still apply.
+- Malformed visibility is admin-only (never open).
+- Registry `snap` comes from `use.snapshot` → that stream's go2rtc name, and only when it is not
+  the main/HD stream; a bad snap name drops the alias only, never the camera.
 
 While the database is down, the last-good camera objects stay in effect for
-`access.config_acl_max_age_s` seconds (from the last successful DB read, or the cache file's
-`saved_at` on a cold start). After that only admins pass. Non-admins never fall back to
-`cams.json` for these checks.
+`access.config_acl_max_age_s` seconds after the last **successful full load** (or the cache file's
+`saved_at` on a cold start). A successful revision probe alone does not refresh that clock. A cache
+file with no `saved_at` is already stale. After expiry only admins pass. Non-admins never fall back
+to `cams.json` for these checks.
 
 ## Rollout
 
