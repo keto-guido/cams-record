@@ -107,7 +107,13 @@ rule as everything else (`docs/camera-access.md`): the camera id must be in `cam
 
 With `push.poll_enabled: true` (default), cams-record polls `cams_detect.events`
 every `push.interval_s` (default 15) and sends once per `event_id` via
-`push_sent_events`. Requires the existing grant:
+`push_sent_events`. An event whose `snapshot_path` is still NULL is held until it
+started more than `push.snapshot_wait_s` (default 5) seconds ago, so a notification
+never arrives before its snapshot can be served; events that never get a snapshot
+still notify after the wait (`0` disables the hold; keep it well below `lookback_s`).
+Claims written before the `event_uid` switch are keyed by the numeric `events.id`;
+the poller skips those events too, so a deploy does not re-push them. Requires the
+existing grant:
 
 ```sql
 GRANT SELECT ON cams_detect.events TO 'cams_record'@'127.0.0.1';
@@ -117,7 +123,7 @@ Production `cams_detect.events` columns used by the poller / event-context path:
 
 | column | type (production) | notes |
 |---|---|---|
-| `id` | `BIGINT` auto-increment PK | internal only; **never** sent in pushes or used for lookups |
+| `id` | `BIGINT` auto-increment PK | internal only; **never** sent in new pushes. Legacy fallback only: `/api/push/event-context/<digits>` with no matching uid looks up this PK (old notifications linked to it) and answers with the uid |
 | `event_uid` | `VARCHAR(64)` UNIQUE, e.g. `1793897909-7de0b7` | the MQTT / API / push event id; the poller emits it, `push_sent_events.event_id` (`VARCHAR(64)`, migration v6) stores it, and `/api/push/event-context/{event_id}` looks it up |
 | `camera_id` | string | |
 | `label` | string | |
@@ -170,10 +176,11 @@ if you can avoid it (it already binds to `127.0.0.1`).
 | `push.vapid_subject` | `mailto:cams@localhost` | Change for production |
 | `push.webhook_secret_file` | `/run/secrets/push_webhook_secret` | Secret |
 | `push.poll_enabled` | `true` | Poll `cams_detect.events` |
-| `push.interval_s` / `lookback_s` | `15` / `120` | Poller timing |
+| `push.interval_s` / `lookback_s` | `15` / `120` | Poller timing; `interval_s` dominates push latency |
+| `push.snapshot_wait_s` | `5` | Hold events without `snapshot_path` until this old; `0` = no hold |
 | `push.labels` | `[]` | Empty = all labels |
 | `push.roles_max_age_days` | `30` | Saved subscriber roles older than this are ignored (see *Who receives an alert*) |
 
 Environment overrides: `PUSH_ENABLED`, `PUSH_VAPID_PRIVATE_FILE`,
 `PUSH_VAPID_PUBLIC_KEY`, `PUSH_VAPID_SUBJECT`, `PUSH_WEBHOOK_SECRET_FILE`,
-`PUSH_POLL_ENABLED`, `PUSH_INTERVAL_S`, `PUSH_LOOKBACK_S`.
+`PUSH_POLL_ENABLED`, `PUSH_INTERVAL_S`, `PUSH_LOOKBACK_S`, `PUSH_SNAPSHOT_WAIT_S`.
