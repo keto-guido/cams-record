@@ -1,0 +1,161 @@
+{
+  "description": "Pinned Cameras frontend + fallback ACL sourced from cams-record. Hub-owned camera-access.js and cams.json are NOT in this set.",
+  "architecture": "self-contained-apphub-package",
+  "source": {
+    "repository": "keto-guido/cams-record",
+    "path": "apphub",
+    "commit": "e0059bd16bad5ea4af7551d1e25ab15dfdc7bc97",
+    "ref_note": "cams-record main commit e0059bd (Admin tab, detection type icons). Its apphub/ tree (47e53f6) is byte-identical to the alert-pause branch (PR #10) commit 86e1160, which adds only the per-camera phone alert pause backend outside apphub/; the hub alert pause UI rides as local_patches. Hub core remains server.js + camera-access.js."
+  },
+  "local_patches": [
+    {
+      "file": "static/cams.js",
+      "upstream_sha256": "0e13a70874f5a3ad35576c2c263765cdaa99c92a332ec24e2807d2f5fd8eb218",
+      "upstream_bytes": 72562,
+      "reasons": [
+        "Accept full registry camera id length (1–64) in #cam= hash routes; upstream still uses {0,31} (max 32).",
+        "Restore live playback + timeline on pageshow when returning from back-forward cache after pagehide cleared tlCam.",
+        "Per-camera phone alert pause: bell control on each camera tile and in the camera player (stays visible in full screen), menu 1 h / 3 h / Until morning / Resume, \"Paused until 9:40 PM\" badges, and the #alerts view listing every permitted camera (deep link from the App Hub menu). Talks to cams-record /api/push/pauses; controls only for owners/admins (server-enforced). Merged alongside upstream's Admin tab routing in show().",
+        "Lightbox snapshot retry: on a failed snapshot load (open or HD toggle) retry once after ~1.5 s with a cache-buster, then fall back to the other resolution if it exists, then show \"Snapshot unavailable\"; retries are tied to the open event/load so a closed or changed lightbox is never touched. Push-tap (#event=) uses has_snapshot / has_snapshot_hires from cams-record /api/push/event-context (missing = false) instead of hardcoding true; the cams-detect events list stays the fallback."
+      ],
+      "canonical_upstream": "Coordinate the max-64 id and bfcache fixes plus the alert pause UI into keto-guido/cams-record apphub/static/cams.js. cams-record alert-pause (PR #10) ships only the backend (/api/push/pauses, push_pauses table, optional MQTT) and leaves apphub/ unchanged; land the same UI in cams-record apphub/, then bump source.commit and clear this entry with sync --write --accept-dropping-local-patches."
+    },
+    {
+      "file": "static/cams.css",
+      "upstream_sha256": "d976a9d1af56648fa33792510e07b7ce5716fd92bc98d7c0c43d1c7a047ab997",
+      "upstream_bytes": 17330,
+      "reasons": [
+        "Styles for the phone alert pause (appended after upstream's Admin tab and detection-icon blocks): tile/player bells, paused badge, shared menu, toast and the Alerts view."
+      ],
+      "canonical_upstream": "cams-record alert-pause (PR #10) ships only the backend (/api/push/pauses, push_pauses table, optional MQTT) and leaves apphub/ unchanged; land the same UI in cams-record apphub/, then bump source.commit and clear this entry with sync --write --accept-dropping-local-patches."
+    },
+    {
+      "file": "cams.js",
+      "upstream_sha256": "31bc2c8ccfec237ac26ac1209c2df48cb16773252318786444d3b4de5fe40a7c",
+      "upstream_bytes": 18789,
+      "reasons": [
+        "Alerts tab (#alerts) and view, camera-page bell + paused badge, shared pause menu and status toast, added to upstream's page markup (Admin tab and views kept).",
+        "Bump cams.js?v=19 → v=20 and cams.css?v=15 → v=16: upstream already used v=19/v=15 for different bytes, and the hub previously shipped its own v=19/v=14, so clients must refetch the patched assets.",
+        "Bump cams.js?v=20 → v=21 for the lightbox snapshot retry and push-tap snapshot flags fix in static/cams.js."
+      ],
+      "canonical_upstream": "Ship with the static/cams.js alert pause UI in cams-record; bump cache versions there. cams-record alert-pause (PR #10) ships only the backend (/api/push/pauses, push_pauses table, optional MQTT) and leaves apphub/ unchanged; land the same UI in cams-record apphub/, then bump source.commit and clear this entry with sync --write --accept-dropping-local-patches."
+    },
+    {
+      "file": "test_cams_page.js",
+      "upstream_sha256": "830e6ce33b9a681988439b6ff601545e1cf4fb87192c63ec32b905402de564dd",
+      "upstream_bytes": 6448,
+      "reasons": [
+        "Expect cams.js?v=20 / cams.css?v=16 after the cache-bump local patch.",
+        "Expect the Alerts tab, #alerts view, player bell, paused badge and shared pause menu markup (upstream Admin assertions kept).",
+        "Expect cams.js?v=21 after the snapshot-retry cache bump."
+      ],
+      "canonical_upstream": "Follow cams-record when its page test expects the alert pause markup and new asset versions."
+    }
+  ],
+  "hub_owned_not_sourced": [
+    "camera-access.js",
+    "cams.json",
+    "server.js",
+    "admin.js",
+    "lib.js",
+    "cli.js",
+    "run.sh",
+    "apps.json",
+    "static/hub.js",
+    "static/style.css",
+    "static/shared/",
+    "pwa/"
+  ],
+  "runtime_required": [
+    "cams.js",
+    "camera_acl.js",
+    "static/cams.js",
+    "static/cams.css",
+    "static/hls.min.js",
+    "static/hls.LICENSE",
+    "static/sw.js",
+    "static/manifest.webmanifest",
+    "static/apple-touch-icon.png",
+    "static/icon-192.png",
+    "static/icon-512.png"
+  ],
+  "contract_fixtures": [
+    "camera_acl_vectors.json"
+  ],
+  "sourced_tests": [
+    "test_camera_access.js",
+    "test_cams_page.js"
+  ],
+  "files": {
+    "cams.js": {
+      "sha256": "2a6eb4304988ec4ab2a0b8f0edbe84d1f4ef863bc5750bc7e15c8a25b1f69cbe",
+      "bytes": 19862
+    },
+    "camera_acl.js": {
+      "sha256": "79c79e704aa0131011ddeaeefff54dec7d9c6d03a873614f248f3d08e22e81ec",
+      "bytes": 3752
+    },
+    "camera_acl_vectors.json": {
+      "sha256": "3b698cbff456377a28002dd6f792df1a972daaab899ec6cb6699839653e669a0",
+      "bytes": 2822
+    },
+    "static/cams.js": {
+      "sha256": "96dbf5ceae662837bbc061c1defd605b9e2a60255ee913411d44a2856a31d1ad",
+      "bytes": 86987
+    },
+    "static/cams.css": {
+      "sha256": "6c7902ab42fa9b2f5d10b7b1d22b879a989108bc13f590c3ae7b6b7f7d6f6e97",
+      "bytes": 21113
+    },
+    "static/hls.min.js": {
+      "sha256": "482cccb3a224554f64d8c2cf0d335dba4a3819bdb726afbfddfe15de4c277d82",
+      "bytes": 388933
+    },
+    "static/hls.LICENSE": {
+      "sha256": "ca8773cf798c7ed997d4dd7c8e23c348699f8d5b7462636694cc14de6cda12db",
+      "bytes": 1338
+    },
+    "static/sw.js": {
+      "sha256": "85db9c542e64f93839f394436090b083647f4031481e04c05eff017edef2e6ae",
+      "bytes": 1945
+    },
+    "static/manifest.webmanifest": {
+      "sha256": "fd4fdbe4df2c112d176a10cbcb98748b6f8fa687dff5dee91160718f4ab32470",
+      "bytes": 560
+    },
+    "static/apple-touch-icon.png": {
+      "sha256": "daf3d9382adfb69f500631eae478a93c20ba8ab339e0f62fce5acb9d78e97198",
+      "bytes": 386
+    },
+    "static/icon-192.png": {
+      "sha256": "19099eadfbab83e7c79c21154745be0247c7a0b7f3912673aec7460e43f80b61",
+      "bytes": 413
+    },
+    "static/icon-512.png": {
+      "sha256": "c9175891247b25503f1458781aa43042234d7762828c202309753831c7212e8f",
+      "bytes": 1496
+    },
+    "test_camera_access.js": {
+      "sha256": "5198c123e4da34395f7ee388fbb97d35b40906cd25dbb7cea2b58d09e3a1bfa2",
+      "bytes": 7497
+    },
+    "test_cams_page.js": {
+      "sha256": "5d50a70e23e684361eaa05e650f55212e3b58c76784fb2f482317851971f42d3",
+      "bytes": 7204
+    }
+  },
+  "mount_contract": {
+    "apphub_host_dir": "/volume1/docker/apphub",
+    "apphub_container_path": "/app",
+    "registry_host_dir": "/volume1/docker/apphub-registry",
+    "registry_container_path": "/registry",
+    "registry_env": "APPHUB_REGISTRY_PUBLISH_DIR=/registry",
+    "notes": [
+      "run.sh bind-mounts the whole apphub host directory at /app. The Cameras builtin (require('./cams')) and its static/ assets must live in that same directory — never ad-hoc copied from another live tree.",
+      "camera_acl.js is the cams.js fallback ACL twin from cams-record; camera-access.js is the hub writer/authorizer. Both must agree on CAMERAS.md / camera_acl_vectors.json decisions.",
+      "cams-record and cams-detect mount only the isolated registry directory read-only; they do not supply cams.js into the hub process.",
+      "files.*.sha256 are package bytes (including local_patches). Upstream pin bytes for patched files are local_patches[].upstream_sha256. sync --from verifies upstream; package tests verify package hashes."
+    ]
+  },
+  "refresh": "node apphub/sync_cams_frontend.js --from /path/to/cams-record-checkout/apphub. Checkout must be the pinned source.commit. --write refuses missing source files and refuses to drop local_patches unless --accept-dropping-local-patches is also passed after a coordinated upstream move."
+}
