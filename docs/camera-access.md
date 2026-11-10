@@ -120,12 +120,29 @@ go2rtc HLS session ids are not tied to a camera, so `cams.js` records each id's 
 | --- | --- | --- |
 | `access.enforce` | `true` | `ACCESS_ENFORCE` |
 | `access.registry_file` | `/apphub-data/cams.json` | `ACCESS_REGISTRY_FILE` |
+| `access.config_acl_max_age_s` | `60` | `ACCESS_CONFIG_ACL_MAX_AGE_S` |
 
 Mount a dedicated directory containing only `cams.json`, not the file: the hub saves by atomic rename, and a
 single-file bind mount would keep reading the old inode. The container user needs read access.
 
 If the file is missing or unreadable, every camera route returns 404, including for admins.
 `access.enforce: false` turns the checks off and is only for local development and tests.
+
+### `camera_source: db` (cams_config ACL)
+
+When cams-record runs with `camera_source: db`, `can_view_camera` and `CameraAccess.allowed` take
+access from cams_config camera objects instead of `cams.json` (file and shadow modes are unchanged):
+
+- Only **enabled** cameras are visible (disabled are hidden from everyone, including admin).
+- Role `admin` sees every enabled camera.
+- `visibility: everyone`: any cams user.
+- `visibility: restricted`: granted users and roles; with no grants, admin-only.
+- Malformed visibility or grant lists are admin-only (never open).
+
+While the database is down, the last-good camera objects stay in effect for
+`access.config_acl_max_age_s` seconds (from the last successful DB read, or the cache file's
+`saved_at` on a cold start). After that only admins pass. Non-admins never fall back to
+`cams.json` for these checks.
 
 ## Rollout
 

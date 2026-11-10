@@ -2,6 +2,11 @@
 
 Python twin of apphub/camera_acl.js; apphub/camera_acl_vectors.json holds the cases both must pass.
 Unregistered and forbidden cameras are indistinguishable to the caller: both raise the same 404.
+
+With ``camera_source: db``, decisions come from cams_config camera objects (not cams.json). File and
+shadow modes keep the registry path unchanged. A cams_config outage uses the last-good objects only
+while they are younger than ``access.config_acl_max_age_s``; after that only admins pass, and
+non-admins never fall back to cams.json.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -21,6 +27,7 @@ log = logging.getLogger(__name__)
 ADMIN_ROLE = "admin"
 ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 SNAP_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+DEFAULT_CONFIG_ACL_MAX_AGE_S = 60
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,47 @@ def can_stream(cameras: dict[str, Camera], name: str, user: str, roles) -> bool:
     return bool(owners) and all(can_access(c, user, roles) for c in owners)
 
 
+def _principals(value) -> frozenset[str] | None:
+    """Non-empty string principals; None when the field is malformed (admin-only, never open)."""
+    if value is None:
+        return frozenset()
+    if isinstance(value, str) or not isinstance(value, (tuple, list, set, frozenset)):
+        return None
+    out = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            return None
+        out.append(item)
+    return frozenset(out)
+
+
+def can_view_config(cam, user: str, roles) -> bool:
+    """cams_config camera-object ACL (camera_source: db). Disabled cameras are hidden from everyone.
+
+    - empty user: deny
+    - disabled / missing: deny (including admin)
+    - role ``admin``: allow every enabled camera
+    - ``visibility: everyone``: any cams user
+    - ``visibility: restricted``: granted users/roles; empty grants are admin-only
+    - malformed visibility or grant lists: admin-only (never open)
+    """
+    if cam is None or not user:
+        return False
+    if not bool(getattr(cam, "enabled", False)):
+        return False
+    if ADMIN_ROLE in roles:
+        return True
+    visibility = getattr(cam, "visibility", None)
+    users, role_grants = _principals(getattr(cam, "users", ())), _principals(getattr(cam, "roles", ()))
+    if users is None or role_grants is None:
+        return False  # malformed grants: admin-only
+    if visibility == "everyone":
+        return True
+    if visibility == "restricted":
+        return user in users or bool(role_grants.intersection(roles))
+    return False  # unknown / malformed visibility: admin-only
+
+
 class CameraRegistry:
     """cams.json, re-read when its stat changes so a revocation applies to the next request."""
 
@@ -121,12 +169,20 @@ class CameraRegistry:
 
 
 class CameraAccess:
-    def __init__(self, cfg: dict, cameras=None):
+    def __init__(self, cfg: dict, cameras=None, *, use_config: bool = False):
         # Registry ACLs stay live on every request. The configured streams are swapped as one
         # snapshot by set_cameras() when the camera list changes (cams_config), never piecemeal.
+        # use_config (camera_source: db) takes ACL from cams_config objects instead of cams.json.
         self.set_cameras(cameras or {})
         self.enforce = cfg["enforce"]
         self.registry = CameraRegistry(cfg["registry_file"])
+        self.use_config = bool(use_config)
+        self.config_max_age_s = float(cfg.get("config_acl_max_age_s", DEFAULT_CONFIG_ACL_MAX_AGE_S))
+        self._config_lock = threading.Lock()
+        self._objects: dict = {}
+        self._loaded_at: float | None = None  # age of the camera-object snapshot (cache saved_at or load)
+        self._last_ok_at: float | None = None  # last successful cams_config DB contact
+        self._origin: str | None = None
 
     def set_cameras(self, cameras) -> None:
         """Each logical camera id maps to its (main_stream, sub_stream) tuple."""
@@ -138,6 +194,25 @@ class CameraAccess:
                 owners.setdefault(source, set()).add(cid)
         self._map = (sources, owners)
 
+    def sync_config(self, source) -> None:
+        """Refresh the cams_config ACL snapshot from a CameraSource (db mode only)."""
+        if not self.use_config or source is None:
+            return
+        with self._config_lock:
+            self._objects = dict(source.cameras)
+            self._loaded_at = source.loaded_at
+            self._last_ok_at = source.last_ok_at
+            self._origin = source.origin
+
+    def set_config_objects(self, objects: dict, *, loaded_at: float | None = None,
+                           last_ok_at: float | None = None, origin: str | None = None) -> None:
+        """Test / direct hook: replace the cams_config ACL snapshot."""
+        with self._config_lock:
+            self._objects = dict(objects or {})
+            self._loaded_at = loaded_at
+            self._last_ok_at = last_ok_at
+            self._origin = origin
+
     @property
     def sources(self) -> dict:
         return self._map[0]
@@ -146,9 +221,35 @@ class CameraAccess:
     def source_owners(self) -> dict:
         return self._map[1]
 
+    def _config_snapshot(self) -> tuple[dict, bool]:
+        """(objects, non_admin_ok). non_admin_ok is False when the snapshot is missing or too old."""
+        with self._config_lock:
+            objects = dict(self._objects)
+            loaded_at, last_ok_at = self._loaded_at, self._last_ok_at
+        if not objects:
+            return {}, False
+        # Prefer last successful DB contact; fall back to snapshot age (cache saved_at on cold start).
+        anchor = last_ok_at if last_ok_at is not None else loaded_at
+        if anchor is None:
+            return objects, False
+        return objects, (time.time() - float(anchor)) <= self.config_max_age_s
+
+    def _viewer_ok(self, who: Viewer) -> bool:
+        return who.claimed_user is None or who.claimed_user == who.user
+
+    def _can_view_object(self, cam, who: Viewer, *, non_admin_ok: bool) -> bool:
+        if not who.user:
+            return False
+        if ADMIN_ROLE in who.roles:
+            return can_view_config(cam, who.user, who.roles)
+        if not non_admin_ok:
+            return False  # stale / DB-down: never widen via cams.json
+        return can_view_config(cam, who.user, who.roles)
+
     def allowed(self, camera: str, who: Viewer) -> bool:
         """Authorize a logical camera for recorded footage (timeline/export/clip/…).
 
+        Registry mode (file/shadow):
         - Parent camera id must pass registry ``can_stream`` (exact id/snap).
         - Every cameras.yaml ``main_stream`` / ``sub_stream`` keeps all ``source_owners`` grants
           via ``can_stream(owner)``.
@@ -158,9 +259,18 @@ class CameraAccess:
           ``source_owners`` grants — no helper registry row and no ``-main`` suffix stripping.
         - Missing cameras.yaml mapping or unknown camera denies, including for admins.
         - Requesting ``cam=<helper>`` without a registry row does not inherit parent capability.
+
+        cams_config mode (camera_source: db):
+        - Parent and every ``source_owners`` peer must pass ``can_view_config``.
+        - Disabled cameras are hidden; stale last-good cache is admin-only.
         """
-        if who.claimed_user is not None and who.claimed_user != who.user:
+        if not self._viewer_ok(who):
             return False
+        if self.use_config:
+            return self._allowed_config(camera, who)
+        return self._allowed_registry(camera, who)
+
+    def _allowed_registry(self, camera: str, who: Viewer) -> bool:
         cameras = self.registry.current()
         source_map, source_owners = self._map  # one consistent snapshot for this decision
         sources = source_map.get(camera)
@@ -178,30 +288,63 @@ class CameraAccess:
                     return False
         return True
 
+    def _allowed_config(self, camera: str, who: Viewer) -> bool:
+        objects, non_admin_ok = self._config_snapshot()
+        source_map, source_owners = self._map
+        sources = source_map.get(camera)
+        cam = objects.get(camera)
+        if not (cam is not None and bool(sources)):
+            return False
+        if not self._can_view_object(cam, who, non_admin_ok=non_admin_ok):
+            return False
+        for src in sources:
+            for owner_id in source_owners.get(src) or ():
+                owner = objects.get(owner_id)
+                if not self._can_view_object(owner, who, non_admin_ok=non_admin_ok):
+                    return False
+        return True
+
     def registered(self, camera: str) -> bool:
+        if self.use_config:
+            objects, _ = self._config_snapshot()
+            return camera in objects
         return camera in self.registry.current()
 
     def can_view_camera(self, camera: str, who: Viewer) -> bool:
-        """Registry decision for one camera id, without recordings: used for detection alerts.
+        """Authorize one camera id without recordings: used for detection alerts.
 
-        Same rule as a stream name: every registry entry whose id or snap equals ``camera`` must allow
-        the viewer. Unregistered cameras and an unusable registry deny everyone, admins included.
+        Registry mode: every registry entry whose id or snap equals ``camera`` must allow the viewer.
+        cams_config mode: the camera object id must pass ``can_view_config`` (enabled + visibility).
+        Unusable / empty sources deny everyone, admins included. Stale DB-down cache is admin-only
+        and never falls back to cams.json for non-admins.
         """
-        if who.claimed_user is not None and who.claimed_user != who.user:
+        if not self._viewer_ok(who):
             return False
+        if self.use_config:
+            objects, non_admin_ok = self._config_snapshot()
+            return self._can_view_object(objects.get(camera), who, non_admin_ok=non_admin_ok)
         return can_stream(self.registry.current(), camera, who.user, who.roles)
 
     def can_manage_alerts(self, camera: str, who: Viewer, admin_roles=(ADMIN_ROLE,)) -> bool:
         """Who may pause a camera's phone alerts (for everyone): an admin, or an owner, meaning a user
-        named in the camera's registry ``users``. A role grant or an open camera only lets you view.
+        named in the camera's ``users`` grant. A role grant or an open camera only lets you view.
 
-        Always on top of ``can_view_camera`` (or, with enforce off, a registered camera), so nobody
+        Registry mode reads cams.json ``users``; cams_config mode reads the camera object's ``users``.
+        Always on top of ``can_view_camera`` (or, with enforce off, a known camera), so nobody
         manages a camera they cannot see.
         """
-        if who.claimed_user is not None and who.claimed_user != who.user:
+        if not self._viewer_ok(who) or not who.user:
             return False
-        if not who.user:
-            return False
+        if self.use_config:
+            if self.enforce and not self.can_view_camera(camera, who):
+                return False
+            if set(admin_roles or ()) & set(who.roles):
+                return True
+            objects, _ = self._config_snapshot()
+            cam = objects.get(camera)
+            if cam is None or not bool(getattr(cam, "enabled", False)):
+                return False
+            return who.user in _principals(getattr(cam, "users", ()))
         cameras = self.registry.current()
         if self.enforce and not can_stream(cameras, camera, who.user, who.roles):
             return False

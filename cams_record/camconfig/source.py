@@ -49,9 +49,11 @@ class CameraSource:
         cached = self._read_cache()
         if cached is None:
             return False
-        rev, cams = cached
+        rev, cams, saved_at = cached
+        # ACL freshness uses the cache's saved_at (not "now"), so a stale file fails closed promptly.
         with self.lock:
-            self.revision, self.cameras, self.origin, self.loaded_at = rev, cams, "cache", time.time()
+            self.revision, self.cameras, self.origin = rev, cams, "cache"
+            self.loaded_at = float(saved_at) if saved_at else time.time()
         log.warning("cams_config: database unreachable, using cached camera objects (revision %s, %d cameras)",
                     rev, len(cams))
         return True
@@ -117,7 +119,7 @@ class CameraSource:
         except OSError as exc:
             log.warning("cams_config: could not write cache %s: %s", self.cache_file, exc)
 
-    def _read_cache(self) -> tuple[int, dict[str, CameraObject]] | None:
+    def _read_cache(self) -> tuple[int, dict[str, CameraObject], float | None] | None:
         if self.cache_file is None or not self.cache_file.exists():
             return None
         try:
@@ -126,7 +128,9 @@ class CameraSource:
             bad = [e for c in cams.values() for e in c.validate()]
             if bad:
                 raise ValueError("; ".join(bad))
-            return int(data["revision"]), cams
+            saved_at = data.get("saved_at")
+            saved = float(saved_at) if isinstance(saved_at, (int, float)) else None
+            return int(data["revision"]), cams, saved
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.error("cams_config: cache %s unusable: %s", self.cache_file, exc)
             return None

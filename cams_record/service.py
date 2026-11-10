@@ -49,8 +49,11 @@ class Service:
             self.recorders[key] = StreamRecorder(cam_id, quality, url, self.rec_cfg, self.indexer, self.guard)
         self.janitor = Janitor(db, self.root, cfg["retention"], int(self.rec_cfg["segment_time"]))
         self.protection = DetectionProtection(db, cfg["detection_protection"])
-        # One registry reader shared by the HTTP routes and detection pushes.
-        self.access = CameraAccess(cfg["access"], cameras)
+        # One ACL reader shared by the HTTP routes and detection pushes.
+        # camera_source db: decisions come from cams_config objects (synced below), not cams.json.
+        self.access = CameraAccess(cfg["access"], cameras, use_config=(self.mode == "db"))
+        if self.mode == "db" and self.source is not None:
+            self.access.sync_config(self.source)
         push_cfg = cfg.get("push") or {}
         # Phone alert pauses need the database; without one nothing can be paused.
         self.pauses = (PushPauses(db, (cfg.get("clips") or {}).get("timezone", "America/Chicago"),
@@ -70,10 +73,17 @@ class Service:
         self._source_thread: threading.Thread | None = None
 
     def alert_cameras(self) -> dict[str, str]:
-        """{camera id: name} of the cameras whose phone alerts can be paused: the camera registry.
+        """{camera id: name} of the cameras whose phone alerts can be paused.
 
-        With access.enforce off and no usable registry, the configured cameras stand in (named by id).
+        Registry mode: cams.json entries. camera_source db: cams_config objects (ACL source of truth).
+        With access.enforce off and no usable source, the configured cameras stand in (named by id).
         """
+        if self.access.use_config:
+            objects, _ = self.access._config_snapshot()
+            if objects or self.access.enforce:
+                return {cid: cam.name for cid, cam in objects.items()}
+            with self._cam_lock:
+                return {cid: cid for cid in self.cameras}
         registry = self.access.registry.current()
         if registry or self.access.enforce:
             return {cid: cam.name for cid, cam in registry.items()}
@@ -150,6 +160,7 @@ class Service:
         cams = {cid: record_camera(o) for cid, o in objects.items()}
         overrides = {cid: dict(o.recording) for cid, o in objects.items() if o.recording}
         self.apply_cameras(cams, overrides)
+        self.access.sync_config(src)
         if self.registry_status["enabled"]:
             try:
                 publish_registry(self.cfg["access"]["registry_file"], objects)
@@ -170,7 +181,11 @@ class Service:
             try:
                 # Retry a failed registry write even when camera objects/revision did not change,
                 # so revocations cannot stay stale after a transient filesystem error.
-                if self.source.poll() or self._registry_needs_retry():
+                changed = self.source.poll()
+                if self.mode == "db":
+                    # Keep ACL freshness (last_ok_at) current even when the revision is unchanged.
+                    self.access.sync_config(self.source)
+                if changed or self._registry_needs_retry():
                     self.on_camera_objects()
             except Exception:  # noqa: BLE001  (never let this thread die)
                 log.exception("cams_config: applying camera objects failed")
