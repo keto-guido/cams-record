@@ -21,8 +21,10 @@ for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-dat
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
 assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('camera_audio.js?v=1'));
-assert(html.indexOf('camera_audio.js?v=1') < html.indexOf('cams.js?v=20'));
-assert(html.includes('cams.css?v=16'));
+assert(html.indexOf('camera_audio.js?v=1') < html.indexOf('cams.js?v=22'));
+assert(html.includes('cams.css?v=17'));
+// Live production (apphub PR #4 / 7c7d020) already shipped cams.js?v=21; never go backwards.
+assert(!html.includes('cams.js?v=20') && !html.includes('cams.js?v=21') && !html.includes('cams.js?v=19'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
 assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
 assert(html.includes('apple-mobile-web-app-capable'));
@@ -53,6 +55,13 @@ assert(client.includes("register('/cams/sw.js'") && client.includes('#event='));
 assert(client.includes('Add to Home Screen') && client.includes('normal tab'));
 assert(client.includes('event=([^&]+)'), 'deep link must accept string event ids');
 assert(client.includes('encodeURIComponent(eid)'));
+// Push deep-link: #event=<uid> -> /api/push/event-context -> lbOpen, with real snapshot flags (not hard-coded true).
+assert(client.includes("CR_PUSH + '/event-context/'") && client.includes('lbOpen(ev)'));
+assert(client.includes('has_snapshot: !!ctx.has_snapshot') && client.includes('has_snapshot_hires: !!ctx.has_snapshot_hires'));
+assert(!/has_snapshot:\s*true/.test(client.split('async function openEventId')[1].split('// ---------- camera management')[0]));
+// Lightbox snapshot retry/fallback (apphub PR #4 behaviour, kept above production v=21).
+assert(client.includes('function lbArmSnapshot') && client.includes('SNAP_RETRY') && client.includes('allowFallback'));
+assert(client.includes('lbImg.onerror'));
 // Admin writes carry the loaded revision, are JSON, and never build HTML from camera data.
 assert(client.includes("ADM = CR + '/api/admin'") && client.includes('expect_revision: adm.revision'));
 assert(client.includes("'Content-Type': 'application/json'"));

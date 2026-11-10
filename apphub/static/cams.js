@@ -182,7 +182,9 @@
   const stOf = (j, q) => { const x = j && j[q]; return typeof x === 'string' ? x : (x && (x.status || x.state)) || (x && x.available ? 'available' : 'unknown'); };
   function lbClose() {
     lb.hidden = true; clearTimeout(lbTimer); lbTimer = null; lbEv = null;
-    lbV.pause(); lbV.removeAttribute('src'); lbV.load(); lbV.hidden = true; lbImg.removeAttribute('src');
+    lbV.pause(); lbV.removeAttribute('src'); lbV.load(); lbV.hidden = true;
+    lbImg.onload = null; lbImg.onerror = null; lbImg.removeAttribute('src');
+    delete lbImg.dataset.snapRetry; delete lbImg.dataset.snapBust;
     lbHiRes = false; lbHd.hidden = true; lbHd.setAttribute('aria-pressed', 'false');
     saveRelease(lbSnapSave); saveRelease(lbClipSave);
     document.body.classList.remove('cd-lb-open');
@@ -214,15 +216,45 @@
       lbTimer = setTimeout(() => lbTry(e), CLIP_RETRY);
     });
   }
+  // Snapshot load: retry a few times (push deep-links can race the file), then fall back to the other resolution.
+  const SNAP_RETRY = 4, SNAP_RETRY_MS = 600;
+  function lbSnapUrl(url, bust) { return bust ? url + (url.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now() : url; }
+  function lbArmSnapshot(e, low, high) {
+    lbImg.onload = null; lbImg.onerror = null; delete lbImg.dataset.snapRetry; delete lbImg.dataset.snapBust;
+    const primary = e.has_snapshot ? low : (e.has_snapshot_hires ? high : '');
+    const fallback = (primary === low && e.has_snapshot_hires) ? high : ((primary === high && e.has_snapshot) ? low : '');
+    lbLow = primary || high || low; lbHigh = (e.has_snapshot && e.has_snapshot_hires) ? high : '';
+    lbHd.hidden = !lbHigh;
+    if (!primary) { lbImg.removeAttribute('src'); lbImg.hidden = true; lbSnap.hidden = true; return; }
+    lbImg.alt = cap(e.label) + ' at ' + (e.camera_name || detName[e.camera] || e.camera);
+    lbImg.hidden = false;
+    saveArm(lbSnapSave, { url: e.has_snapshot_hires ? high : primary, filename: recCam(e) + '_' + fileStamp(e.start_ts) + '.jpg', type: 'image/jpeg' });
+    const load = (url, allowFallback) => {
+      lbImg.onerror = () => {
+        if (lbEv !== e) return;
+        const n = +(lbImg.dataset.snapRetry || 0);
+        if (n < SNAP_RETRY) {
+          lbImg.dataset.snapRetry = String(n + 1);
+          setTimeout(() => { if (lbEv === e) { lbImg.src = lbSnapUrl(url, true); } }, SNAP_RETRY_MS * (n + 1));
+          return;
+        }
+        if (allowFallback && fallback) {
+          delete lbImg.dataset.snapRetry;
+          lbLow = fallback;
+          load(fallback, false);
+          return;
+        }
+        lbImg.onerror = null; lbImg.hidden = true;
+      };
+      lbImg.src = url;
+    };
+    load(primary, true);
+  }
   function lbOpen(e) {
     lbClose(); lbEv = e;
     const name = e.camera_name || detName[e.camera] || e.camera, label = cap(e.label), base = CD + '/api/events/' + encodeURIComponent(e.id), low = base + '/snapshot.jpg', high = base + '/snapshot_hires.jpg';
     lbInfo.textContent = label + ' · ' + name + ' · ' + fmt(e.start_ts);
-    lbLow = e.has_snapshot ? low : high; lbHigh = e.has_snapshot && e.has_snapshot_hires ? high : ''; lbHd.hidden = !lbHigh;
-    if (e.has_snapshot || e.has_snapshot_hires) {
-      lbImg.src = lbLow; lbImg.alt = label + ' at ' + name; lbImg.hidden = false;
-      saveArm(lbSnapSave, { url: e.has_snapshot_hires ? high : low, filename: recCam(e) + '_' + fileStamp(e.start_ts) + '.jpg', type: 'image/jpeg' });
-    } else { lbImg.hidden = true; lbSnap.hidden = true; }
+    lbArmSnapshot(e, low, high);
     lbClip.hidden = true; lbNote.textContent = ''; lbMsg.textContent = 'Loading clip…';
     lb.hidden = false; document.body.classList.add('cd-lb-open'); lb.querySelector('.cd-lb-x').focus();
     lbTry(e);
@@ -637,6 +669,7 @@
       let ev = null;
       try {
         const ctx = await pushJson(CR_PUSH + '/event-context/' + encodeURIComponent(eid));
+        // Real flags from cams-record (paths non-NULL). Never assume both snapshots exist.
         ev = {
           id: ctx.id,
           camera: ctx.camera_id || ctx.camera,
@@ -645,8 +678,8 @@
           score: ctx.score,
           start_ts: ctx.start_ts,
           end_ts: ctx.end_ts,
-          has_snapshot: true,
-          has_snapshot_hires: true,
+          has_snapshot: !!ctx.has_snapshot,
+          has_snapshot_hires: !!ctx.has_snapshot_hires,
         };
       } catch (e) {
         const list = await fetch(CD + '/api/events?limit=50', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []);
