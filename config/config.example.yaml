@@ -61,8 +61,9 @@ push:
   vapid_subject: mailto:cams@localhost   # contact URI shown to push services
   webhook_secret_file: /run/secrets/push_webhook_secret
   poll_enabled: true       # send from cams_detect.events poller (no cams-detect change required)
-  interval_s: 15
+  interval_s: 15           # poll period; the main lever for push latency
   lookback_s: 120
+  snapshot_wait_s: 5       # hold events without a snapshot until this old (0 = send immediately)
   # labels: [person, car]  # optional allow-list; empty = all labels
   roles_max_age_days: 30   # alerts follow per-camera access; roles saved with a subscription expire after this
   ttl_s: 86400
