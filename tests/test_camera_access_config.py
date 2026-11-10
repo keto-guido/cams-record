@@ -290,3 +290,157 @@ def test_service_wires_use_config_in_db_mode(tmp_path):
     svc = Service(cfg, cams, db=None, source=source, file_cameras=cams)
     assert svc.access.use_config is True
     assert svc.access.can_view_camera("open", Viewer("bob", ("cams",)))
+
+
+def test_can_manage_alerts_config_owners_and_admin_only():
+    """Pause writes: user grant or admin; role grant / open / empty grants only view."""
+    access = _access({
+        "open": _obj("open", visibility="everyone"),
+        "family": _obj("family", visibility="restricted", roles=("family",)),
+        "private": _obj("private", visibility="restricted", users=("ann",)),
+        "main-st-south": _obj("main-st-south", visibility="restricted"),  # empty grants
+        "off": _obj("off", enabled=False, visibility="restricted", users=("ann",)),
+    })
+    ann, bob, carol, root = (Viewer("ann", ("cams",)), Viewer("bob", ("cams",)),
+                             Viewer("carol", ("cams", "family")), Viewer("root", ("admin",)))
+    assert access.can_manage_alerts("private", ann)
+    assert not access.can_manage_alerts("private", bob)
+    assert access.can_manage_alerts("private", root)
+    assert not access.can_manage_alerts("open", bob)  # open: view only
+    assert access.can_manage_alerts("open", root)
+    assert not access.can_manage_alerts("family", carol)  # role grant: view only
+    assert access.can_view_camera("family", carol)
+    assert not access.can_manage_alerts("main-st-south", bob)
+    assert not access.can_view_camera("main-st-south", bob)
+    assert access.can_manage_alerts("main-st-south", root)
+    assert not access.can_manage_alerts("off", ann)
+    assert not access.can_manage_alerts("off", root)
+    assert not access.can_manage_alerts("missing", root)
+
+
+def test_pause_api_uses_config_acl(tmp_path):
+    """List / set / clear follow cams_config ACL (main-st-south-style empty grants → 404)."""
+    from fastapi.testclient import TestClient
+
+    from cams_record.config import DEFAULTS, deep_merge, validate
+    from cams_record.service import Service
+    from cams_record.web import create_app
+    from tests.test_pauses import Clock, FakeDB, local
+    from tests.test_push import tok
+
+    secret = tmp_path / "secret"
+    secret.write_text("s3cret-for-tests-0123456789abcdef-xyz\n")
+    registry = tmp_path / "cams.json"
+    # Deliberately empty registry: db mode must not fall back to cams.json for non-admins.
+    registry.write_text("[]")
+    (tmp_path / "nvr").mkdir()
+    (tmp_path / "state").mkdir()
+    cfg = validate(deep_merge(DEFAULTS, {
+        "camera_source": "db",
+        "auth": {"mode": "jwt", "secret_file": str(secret), "roles": ["cams", "admin"],
+                 "admin_roles": ["admin"]},
+        "access": {"enforce": True, "registry_file": str(registry), "publish_registry": False,
+                   "config_acl_max_age_s": 60},
+        "recording": {"root": str(tmp_path / "nvr"), "state_dir": str(tmp_path / "state")},
+        "push": {"enabled": False, "pause_refresh_s": 30},
+        "detection_protection": {"enabled": False},
+        "mqtt": {"enabled": False},
+        "cams_config": {"cache_file": str(tmp_path / "cache.json")},
+        "clips": {"timezone": "America/Chicago"},
+    }))
+    objects = {
+        "open": _obj("open", visibility="everyone"),
+        "private": _obj("private", visibility="restricted", users=("ann",)),
+        "family": _obj("family", visibility="restricted", roles=("family",)),
+        "main-st-south": _obj("main-st-south", visibility="restricted"),
+    }
+    objects["open"].name = "Open"
+    objects["private"].name = "Private"
+    objects["family"].name = "Family"
+    objects["main-st-south"].name = "Main St South"
+
+    source = SimpleNamespace(cameras=objects, origin="db", loaded_at=time.time(),
+                             last_ok_at=time.time(), revision=1, store=None)
+    cams = {cid: record_camera(o) for cid, o in objects.items()}
+    clock = Clock(local(2026, 1, 15, 21, 40).timestamp())
+    db = FakeDB(clock)
+    svc = Service(cfg, cams, db=db, source=source, file_cameras=cams)
+    svc.pauses.clock = clock
+    client = TestClient(create_app(svc, cfg))
+    url = "/cams-record/api/push/pauses"
+
+    def h(user="bob", roles=("cams",)):
+        return {"x-apphub-token": tok(sub=user, roles=list(roles))}
+
+    # Ungranted viewer: list filtered; writes on restricted empty-grant camera → same 404 as unknown.
+    bob = client.get(url, headers=h("bob"))
+    assert bob.status_code == 200
+    assert [c["camera_id"] for c in bob.json()["cameras"]] == ["open"]
+    for cam in ("main-st-south", "private", "missing"):
+        put = client.put(f"{url}/{cam}", headers=h("bob"), json={"duration": "1h"})
+        delete = client.delete(f"{url}/{cam}", headers=h("bob"))
+        assert put.status_code == delete.status_code == 404
+        assert put.json() == delete.json() == {"detail": "camera not found"}
+    assert db.writes == 0
+
+    # Role grant views but cannot pause.
+    carol = client.get(url, headers=h("carol", ("cams", "family")))
+    assert {c["camera_id"] for c in carol.json()["cameras"]} == {"open", "family"}
+    assert client.put(f"{url}/family", headers=h("carol", ("cams", "family")),
+                      json={"duration": "1h"}).status_code == 403
+    assert db.writes == 0
+
+    # Granted owner can set and clear; list shows can_edit.
+    ann_list = client.get(url, headers=h("ann")).json()
+    by = {c["camera_id"]: c for c in ann_list["cameras"]}
+    assert set(by) == {"open", "private"}
+    assert by["private"]["can_edit"] is True and by["open"]["can_edit"] is False
+    assert "main-st-south" not in by
+    r = client.put(f"{url}/private", headers=h("ann"), json={"duration": "1h"})
+    assert r.status_code == 200 and r.json()["paused"] is True and r.json()["mode"] == "1h"
+    assert svc.pauses.is_paused("private")
+    r = client.delete(f"{url}/private", headers=h("ann"))
+    assert r.status_code == 200 and r.json()["paused"] is False
+    assert not svc.pauses.is_paused("private")
+
+    # Admin sees all (including empty-grant) and can pause any enabled camera.
+    admin = client.get(url, headers=h("root", ("admin",))).json()
+    assert {c["camera_id"] for c in admin["cameras"]} == {"open", "private", "family", "main-st-south"}
+    assert all(c["can_edit"] for c in admin["cameras"])
+    r = client.put(f"{url}/main-st-south", headers=h("root", ("admin",)), json={"duration": "3h"})
+    assert r.status_code == 200 and r.json()["paused"] is True
+    assert svc.pauses.is_paused("main-st-south")
+
+
+def test_config_round_trip_keeps_acl_and_pause_mqtt(tmp_path):
+    """Defaults + env keep #14 ACL freshness and #10 pause/mqtt / snapshot_wait settings together."""
+    from cams_record.config import load_config
+
+    (tmp_path / "cameras.yaml").write_text(yaml.safe_dump({"cameras": {}}))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+        "access": {"config_acl_max_age_s": 45},
+        "push": {"snapshot_wait_s": 7, "pause_refresh_s": 12},
+        "mqtt": {"enabled": False, "host": "mqtt.example", "port": 1884,
+                 "client_id": "cams-test", "discovery_prefix": "homeassistant",
+                 "base_topic": "cams-record"},
+    }))
+    cfg, _ = load_config(tmp_path, env={
+        "ACCESS_CONFIG_ACL_MAX_AGE_S": "90",
+        "PUSH_SNAPSHOT_WAIT_S": "3",
+        "MQTT_ENABLED": "false",
+        "MQTT_HOST": "broker.local",
+        "MQTT_PORT": "1885",
+        "MQTT_CLIENT_ID": "cams-env",
+        "MQTT_DISCOVERY_PREFIX": "ha",
+        "MQTT_BASE_TOPIC": "cams",
+    })
+    assert cfg["access"]["config_acl_max_age_s"] == 90
+    assert cfg["push"]["snapshot_wait_s"] == 3
+    assert cfg["push"]["pause_refresh_s"] == 12
+    assert cfg["mqtt"]["enabled"] is False
+    assert cfg["mqtt"]["host"] == "broker.local"
+    assert cfg["mqtt"]["port"] == 1885
+    assert cfg["mqtt"]["client_id"] == "cams-env"
+    assert cfg["mqtt"]["discovery_prefix"] == "ha"
+    assert cfg["mqtt"]["base_topic"] == "cams"
+
