@@ -32,6 +32,7 @@ auth:
 access:
   enforce: true          # per-camera ACL from App Hub's cams.json; see docs/camera-access.md
   registry_file: /apphub-data/cams.json
+  # config_acl_max_age_s: 60  # camera_source db: last-good cams_config ACL age before admin-only
 db:
   host: 127.0.0.1        # the NAS's MariaDB 10 (host networking)
   port: 3306

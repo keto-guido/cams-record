@@ -85,10 +85,32 @@ def test_registry_entry_access_shapes():
     assert _cam(visibility="everyone").registry_entry() == {"id": "cam-1", "name": "Cam 1"}
     assert _cam().registry_entry() == {"id": "cam-1", "name": "Cam 1", "roles": ["admin"]}  # admins only
     assert _cam(users=("ann",)).registry_entry() == {"id": "cam-1", "name": "Cam 1", "users": ["ann"], "roles": []}
-    snap = _cam(use={"snapshot": ("main",)}, visibility="everyone").registry_entry()
-    assert snap == {"id": "cam-1", "name": "Cam 1", "snap": "cam-1-main"}
-    with pytest.raises(ValueError):
-        _cam(streams={"sub": Stream("sub", "has space")}, use={"snapshot": ("sub",)}).registry_entry()
+    # Snapshot/live must not publish main/HD: a snapshot purpose on main drops the alias only.
+    assert _cam(use={"snapshot": ("main",)}, visibility="everyone").registry_entry() == {
+        "id": "cam-1", "name": "Cam 1",
+    }
+    # Malformed snap name drops the alias, never the camera.
+    assert _cam(streams={"sub": Stream("sub", "has space")}, use={"snapshot": ("sub",)}).registry_entry() == {
+        "id": "cam-1", "name": "Cam 1", "roles": ["admin"],
+    }
+
+
+def test_registry_snap_rejects_main_and_hd_alias():
+    """Snapshot row pointing at main (or at the main go2rtc name) must not become cams.json snap."""
+    cam = _cam(visibility="everyone",
+               streams={"main": Stream("main", "front-yard-hd"), "sub": Stream("sub", "front-yard")},
+               use={"live": ("sub",), "snapshot": ("main",), "record": ("main", "sub")})
+    assert cam.registry_snap() is None
+    assert "snap" not in cam.registry_entry()
+    # Even a non-main key whose go2rtc_name is the HD stream is dropped.
+    cam.use["snapshot"] = ("snap",)
+    cam.streams["snap"] = Stream("snap", "front-yard-hd")
+    assert cam.registry_snap() is None
+    # Sub/low-res alias distinct from id is kept.
+    cam.use["snapshot"] = ("sub",)
+    cam.streams["sub"] = Stream("sub", "front-yard-raw")
+    assert cam.registry_snap() == "front-yard-raw"
+    assert cam.registry_entry()["snap"] == "front-yard-raw"
 
 
 def test_admin_only_export_decisions():
@@ -96,6 +118,17 @@ def test_admin_only_export_decisions():
     assert can_access(reg["cam-1"], "root", ["admin"])
     assert not can_access(reg["cam-1"], "ann", ["cams"])
     assert not can_access(reg["cam-1"], "ann", ["cams", "family"])
+
+
+def test_access_grant_target_accepts_only_user_and_role():
+    from cams_record.camconfig.store import access_grant_target
+
+    assert access_grant_target("user", "ann") == "users"
+    assert access_grant_target("role", "family") == "roles"
+    assert access_grant_target("group", "x") is None
+    assert access_grant_target("user", "") is None
+    assert access_grant_target("user", None) is None
+    assert access_grant_target("role", 3) is None
 
 
 def test_record_camera_preserves_sub_only_recording():

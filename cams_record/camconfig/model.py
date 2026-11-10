@@ -135,18 +135,44 @@ class CameraObject:
         return errs
 
     # -- App Hub registry -----------------------------------------------------
+    def registry_snap(self) -> str | None:
+        """go2rtc name for cams.json ``snap``, or None to omit the alias.
+
+        Snapshot (like live) must resolve to a non-main stream. The snapshot purpose is read from
+        ``use["snapshot"]`` → that stream's ``go2rtc_name``. If the purpose points at ``main``, or
+        the resolved name is the main/HD stream, the alias is dropped (fail closed). A malformed
+        snap name also drops only the alias — the camera entry is still published.
+        """
+        keys = self.effective_use().get("snapshot") or ()
+        if not keys:
+            return None
+        key = keys[0]
+        if key == "main":
+            return None
+        stream = self.streams.get(key)
+        if stream is None or not isinstance(stream.go2rtc_name, str) or not stream.go2rtc_name:
+            return None
+        name = stream.go2rtc_name
+        main = self.streams.get("main")
+        if main is not None and name == main.go2rtc_name:
+            return None  # never publish HD/main as the live-tile snap
+        if name == self.id:
+            return None  # hub already plays the id stream
+        if not SNAP_RE.fullmatch(name) or ".." in name:
+            return None
+        return name
+
     def registry_entry(self) -> dict:
         """This camera as a cams.json entry (docs/camera-access.md) with the same access decisions.
 
         A restricted camera with no grants becomes ``roles: ["admin"]``: admins always pass, nobody
         else holds a role literally named admin without being one. The hub's live view plays the
-        stream named after the id; a different snapshot stream is exported as ``snap``.
+        stream named after the id; a different snapshot stream is exported as ``snap`` only when
+        ``registry_snap()`` accepts it (sub/low-res only; bad names drop the alias, not the camera).
         """
         entry: dict = {"id": self.id, "name": self.name}
-        snap = self.stream_for("snapshot")
-        if snap and snap != self.id:
-            if not SNAP_RE.fullmatch(snap) or ".." in snap:
-                raise ValueError(f"{self.id}: snapshot stream {snap!r} cannot be published as a registry snap")
+        snap = self.registry_snap()
+        if snap:
             entry["snap"] = snap
         if self.visibility == "restricted":
             users, roles = sorted(set(self.users)), sorted(set(self.roles))

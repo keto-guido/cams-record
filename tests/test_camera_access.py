@@ -61,8 +61,11 @@ def test_node_twin_passes_same_vectors():
 
 def test_config():
     assert DEFAULTS["access"]["enforce"] is True
-    cfg = apply_env(deep_merge(DEFAULTS, None), {"ACCESS_REGISTRY_FILE": "/x/cams.json", "ACCESS_ENFORCE": "0"})
-    assert validate(cfg)["access"] == {"enforce": False, "registry_file": "/x/cams.json", "publish_registry": False}
+    assert DEFAULTS["access"]["config_acl_max_age_s"] == 60
+    cfg = apply_env(deep_merge(DEFAULTS, None), {"ACCESS_REGISTRY_FILE": "/x/cams.json", "ACCESS_ENFORCE": "0",
+                                                 "ACCESS_CONFIG_ACL_MAX_AGE_S": "30"})
+    assert validate(cfg)["access"] == {"enforce": False, "registry_file": "/x/cams.json",
+                                       "publish_registry": False, "config_acl_max_age_s": 30.0}
     with pytest.raises(ValueError, match="publish_registry needs camera_source: db"):
         validate(deep_merge(DEFAULTS, {"access": {"publish_registry": True}}))
     with pytest.raises(ValueError, match="publish_registry must be"):

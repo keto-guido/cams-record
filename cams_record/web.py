@@ -331,8 +331,8 @@ def create_app(service, cfg: dict):
 
     # ---- phone alert pauses (cams_record/pauses.py): per camera, for every subscriber ----
     # Anyone who can view a camera sees whether its alerts are paused; only its owners (users named
-    # in the registry entry) and admins change that. Cameras the viewer cannot see are never listed,
-    # and a write to one answers the same 404 as an unknown camera.
+    # in the ACL ``users`` grant — cams.json or cams_config) and admins change that. Cameras the
+    # viewer cannot see are never listed, and a write to one answers the same 404 as an unknown camera.
     pauses = getattr(service, "pauses", None)
     admin_roles = tuple(cfg["auth"].get("admin_roles") or ["admin"])
 

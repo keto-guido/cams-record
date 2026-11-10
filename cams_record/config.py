@@ -90,6 +90,9 @@ DEFAULTS: dict[str, Any] = {
         # camera_source db only: write registry_file from cams_config on every change. The registry
         # directory must then be mounted read-write for cams-record (and stay read-only elsewhere).
         "publish_registry": False,
+        # camera_source db only: last-good cams_config ACL stays open to non-admins for this long
+        # after the last successful DB read (or cache saved_at on cold start); then admin-only.
+        "config_acl_max_age_s": 60,
     },
     "push": {
         "enabled": True,  # still inactive until vapid_private_file is present
@@ -162,6 +165,7 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "DETECTION_PROTECTION_DAYS": (("detection_protection", "days"), float),
     "CAMERA_SOURCE": (("camera_source",), str),
     "ACCESS_PUBLISH_REGISTRY": (("access", "publish_registry"), bool),
+    "ACCESS_CONFIG_ACL_MAX_AGE_S": (("access", "config_acl_max_age_s"), float),
     "AUTH_APP_ID": (("auth", "app_id"), str),
     "ACCESS_ENFORCE": (("access", "enforce"), bool),
     "ACCESS_REGISTRY_FILE": (("access", "registry_file"), str),
@@ -403,6 +407,7 @@ def validate(cfg: dict) -> dict:
             raise ValueError("access.publish_registry needs camera_source: db")
         if not cfg["access"]["registry_file"]:
             raise ValueError("access.publish_registry needs access.registry_file")
+    _positive("access.config_acl_max_age_s", cfg["access"].get("config_acl_max_age_s", 60))
     cc = cfg["cams_config"]
     _positive("cams_config.poll_s", cc["poll_s"])
     if not cc.get("cache_file"):

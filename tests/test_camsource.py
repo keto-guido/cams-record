@@ -18,6 +18,7 @@ from cams_record.camconfig.model import CameraObject, Stream
 from cams_record.camconfig.publish import publish_registry, registry_text
 from cams_record.camconfig.source import CameraSource
 from cams_record.camconfig.views import detect_camera, record_camera
+from cams_record.camera_access import CameraAccess, Viewer
 from cams_record.config import DEFAULTS, deep_merge, resolve_camera, validate
 from cams_record.db import DBUnavailable
 from cams_record.service import Service
@@ -41,6 +42,7 @@ class FlakyStore:
 
     def __init__(self, cams=None, rev=1):
         self.cams, self.rev, self.down = dict(cams or {}), rev, False
+        self.load_fail = False  # revision OK but full load fails (partial outage)
 
     def revision(self):
         if self.down:
@@ -48,8 +50,8 @@ class FlakyStore:
         return self.rev
 
     def load_all(self):
-        if self.down:
-            raise DBUnavailable("connection refused")
+        if self.down or self.load_fail:
+            raise DBUnavailable("connection refused" if self.down else "load failed")
         return self.rev, {k: CameraObject.from_dict(v.to_dict()) for k, v in self.cams.items()}
 
 
@@ -93,6 +95,71 @@ def test_source_starts_from_cache_when_db_down(tmp_path):
     store.down = False
     assert src.poll() is False  # back on the database; same cameras, so nothing to apply
     assert src.origin == "db"
+
+
+def test_poll_revision_ok_load_fail_does_not_refresh_last_ok_at(tmp_path):
+    """A successful SELECT revision must not keep revoked grants alive when load_all fails."""
+    import time
+
+    store = FlakyStore({"private": cam("private", visibility="restricted", users=("ann",))})
+    src = CameraSource({}, tmp_path / "cache.json", store=store)
+    assert src.load_initial() and src.last_ok_at is not None
+    first_ok = src.last_ok_at
+    # Revoke ann, bump revision, but make the full load fail after revision succeeds.
+    store.cams["private"] = cam("private", visibility="restricted")  # empty grants
+    store.rev = 2
+    store.load_fail = True
+    time.sleep(0.05)
+    assert src.poll() is False
+    assert src.last_ok_at == first_ok  # not refreshed by the revision probe alone
+    assert src.origin == "db" and src.cameras["private"].users == ("ann",)  # stale objects kept
+    # ACL freshness still ages from the last full load — after max_age, non-admins are denied.
+    access = CameraAccess(
+        {"enforce": True, "registry_file": str(tmp_path / "cams.json"), "config_acl_max_age_s": 1},
+        {"private": record_camera(src.cameras["private"])}, use_config=True,
+    )
+    access.sync_config(src)
+    assert access.can_view_camera("private", Viewer("ann", ("cams",)))  # still within 1s
+    time.sleep(1.2)
+    assert not access.can_view_camera("private", Viewer("ann", ("cams",)))
+    assert access.can_view_camera("private", Viewer("root", ("admin",)))
+
+
+def test_cold_start_stale_cache_stays_stale_when_load_fails(tmp_path):
+    """7-day-old cache must not become fresh after a revision-only poll when load_all fails."""
+    import time
+
+    cache = tmp_path / "cache.json"
+    old = time.time() - 7 * 86400
+    cache.write_text(json.dumps({
+        "revision": 1,
+        "saved_at": old,
+        "cameras": {"open": cam("open").to_dict()},
+    }))
+    store = FlakyStore({"open": cam("open")}, rev=1)
+    store.load_fail = True  # revision works, full load does not (partial outage)
+    src = CameraSource({}, cache, store=store)
+    assert src.load_initial() and src.origin == "cache"
+    assert src.loaded_at == old and src.last_ok_at is None
+    assert src.poll() is False
+    assert src.origin == "cache" and src.last_ok_at is None and src.loaded_at == old
+
+
+def test_cache_without_saved_at_is_stale(tmp_path):
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"revision": 1, "cameras": {"open": cam("open").to_dict()}}))
+    store = FlakyStore(rev=1)
+    store.down = True
+    src = CameraSource({}, cache, store=store)
+    assert src.load_initial() and src.origin == "cache"
+    assert src.loaded_at is None and src.last_ok_at is None
+    access = CameraAccess(
+        {"enforce": True, "registry_file": str(tmp_path / "cams.json"), "config_acl_max_age_s": 60},
+        {"open": record_camera(src.cameras["open"])}, use_config=True,
+    )
+    access.sync_config(src)
+    assert not access.can_view_camera("open", Viewer("bob", ("cams",)))
+    assert access.can_view_camera("open", Viewer("root", ("admin",)))
 
 
 def test_source_without_db_or_cache(tmp_path):
@@ -263,13 +330,18 @@ def test_db_mode_applies_and_publishes_registry(tmp_path, fake_recorders):
 def test_publish_refuses_to_drop_a_camera_and_keeps_old_file(tmp_path):
     path = tmp_path / "cams.json"
     path.write_text("[]")
+    # Bad snap names only drop the alias; an invalid camera id is what would drop the entry.
     bad = cam("garage")
-    bad.streams["snap"] = Stream("snap", "has space")
-    bad.use["snapshot"] = ("snap",)
-    with pytest.raises(ValueError):
-        publish_registry(path, {"garage": bad})
+    bad.id = "Bad_ID"
+    with pytest.raises(ValueError, match="would drop"):
+        publish_registry(path, {"Bad_ID": bad})
     assert path.read_text() == "[]"
-    assert publish_registry(path, {"garage": cam("garage")}) is True
+    # Malformed snap is omitted; the camera is still published.
+    spaced = cam("garage")
+    spaced.streams["snap"] = Stream("snap", "has space")
+    spaced.use["snapshot"] = ("snap",)
+    assert publish_registry(path, {"garage": spaced}) is True
+    assert json.loads(path.read_text()) == [{"id": "garage", "name": "Garage"}]
     assert publish_registry(path, {"garage": cam("garage")}) is False
     assert json.loads(registry_text({"garage": cam("garage")})) == json.loads(path.read_text())
 
