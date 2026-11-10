@@ -52,6 +52,19 @@
     return null;
   }
 
+  /**
+   * cams-audio docs: successful PATCH returns the source object itself (not `{source:…}`).
+   * Still accept a nested `source` if one is present for older/proxy shapes.
+   */
+  function sourceFromResponse(body) {
+    if (body == null) return null;
+    if (typeof body !== 'object') return null;
+    if (Object.prototype.hasOwnProperty.call(body, 'source') && body.source != null && typeof body.source === 'object') {
+      return body.source;
+    }
+    return body;
+  }
+
   function normalizeAudio(body, cameraId) {
     const b = body || {};
     return {
@@ -64,7 +77,8 @@
       camera_id: b.camera_id || cameraId,
       name: b.name || cameraId,
       type: b.type || 'camera',
-      source: Object.prototype.hasOwnProperty.call(b, 'source') ? b.source : undefined,
+      // The linked source is the audio object itself once created.
+      source: b,
     };
   }
 
@@ -98,7 +112,12 @@
         err.cause = e;
         throw err;
       }
-      const body = await r.json().catch(() => ({}));
+      // 200 with a JSON null body is valid (no linked source).
+      const text = await r.text();
+      let body = null;
+      if (text && text.trim() !== '') {
+        try { body = JSON.parse(text); } catch (e) { body = {}; }
+      }
       if (!r.ok) {
         const err = new Error((body && (body.detail || body.message)) || ('Request failed (' + r.status + ')'));
         err.status = r.status;
@@ -138,9 +157,6 @@
     const row = list.find(c => c && c.camera_id === cameraId);
     if (!row) return { state: 'hidden' };
     if (row.has_audio !== true) return { state: 'hidden' };
-    if (row.source == null) {
-      return { state: 'ready', audio: unlinkedAudio(cameraId, row.name), name: row.name || cameraId, client };
-    }
     let detail;
     try {
       detail = await client.get(cameraId);
@@ -148,8 +164,12 @@
       if (e.status === 404) return { state: 'error', message: 'Unknown camera for the audio service.' };
       return { state: 'error', message: e.message || 'Audio service error' };
     }
-    const audio = normalizeAudio({ ...detail, source: row.source }, cameraId);
-    return { state: 'ready', audio, name: row.name || cameraId, client };
+    // Docs: GET returns the linked source object, or null (200) when the camera has no source.
+    if (detail == null) {
+      return { state: 'ready', audio: unlinkedAudio(cameraId, row.name), name: row.name || cameraId, client };
+    }
+    const src = sourceFromResponse(detail);
+    return { state: 'ready', audio: normalizeAudio(src, cameraId), name: row.name || cameraId, client };
   }
 
   /**
@@ -272,12 +292,9 @@
               stream: streamVal === '' ? null : streamVal,
             };
           const updated = await client.patch(o.cameraId, payload);
-          const next = normalizeAudio({
-            ...current,
-            ...updated,
-            config: updated.config || { stream: streamOf(updated) },
-            source: Object.prototype.hasOwnProperty.call(updated, 'source') ? updated.source : current.source,
-          }, o.cameraId);
+          const src = sourceFromResponse(updated);
+          if (src == null) throw Object.assign(new Error('Audio service returned no source'), { status: 502 });
+          const next = normalizeAudio(src, o.cameraId);
           current = next;
           applyAudioToForm(next, ei, ci, ti, si);
           msg.textContent = linking ? 'Audio source linked.' : 'Audio settings saved.';
@@ -346,7 +363,7 @@
 
   return {
     DEFAULT_BASE, RETENTION_MIN, RETENTION_MAX, DEFAULTS,
-    defaults, validateRetention, classifyListError, normalizeAudio, streamOf, unlinkedAudio,
-    api, loadCameraAudio, mount,
+    defaults, validateRetention, classifyListError, normalizeAudio, streamOf,
+    sourceFromResponse, unlinkedAudio, api, loadCameraAudio, mount,
   };
 });

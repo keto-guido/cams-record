@@ -303,14 +303,14 @@ that calls the same-origin `/cams-audio` JSON API with the App Hub `apphub_token
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/cams-audio/api/cameras` | `[{camera_id, name, has_audio, source}]` (`source` is null when unlinked) |
-| GET | `/cams-audio/api/cameras/{id}/audio` | `{id, name, type:"camera", enabled, clip_retention_days, transcript_retention_days, camera_id, config:{stream}}` |
-| PATCH | `/cams-audio/api/cameras/{id}/audio` | partial `{enabled, clip_retention_days, transcript_retention_days, stream}`; retention 1–3650 |
+| GET | `/cams-audio/api/cameras/{id}/audio` | linked source object, or `null` (HTTP 200) when unlinked |
+| PATCH | `/cams-audio/api/cameras/{id}/audio` | partial `{enabled, clip_retention_days, transcript_retention_days, stream}`; retention 1–3650; success body is the source object itself |
 
 Defaults: `enabled` on (when a source is already linked), clip retention 90 days, transcript
-retention 365 days. `has_audio` decides whether the Audio section appears. If `has_audio` is true
-but `source` is null, the panel still shows with **Enable** off; turning Enable on sends
+retention 365 days. `has_audio` decides whether the Audio section appears. A null GET body (or list
+`source: null`) shows the normal panel with **Enable** off; turning Enable on sends
 `PATCH …/audio` with `{"enabled": true}`, which creates the linked source — the UI then refreshes
-from the returned `source` object. If the list GET returns 404/502 or the network fails, the panel
+from the returned source object. If the list GET returns 404/502 or the network fails, the panel
 shows "Audio service not installed". PATCH 404 = unknown camera; PATCH 409 (enabling a camera with
 no audio) is shown inline.
 

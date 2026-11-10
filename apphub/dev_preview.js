@@ -49,17 +49,18 @@ const audioDb={
   'back-yard':{has_audio:true,source:{id:'src-back-yard'},enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:'back-yard-raw'},
   'mckinley-webcam':{has_audio:false,source:null,enabled:true,clip_retention_days:90,transcript_retention_days:365,stream:null},
 };
-function audioDetail(id,cur){
+function audioSource(id,cur){
   return{id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,type:'camera',enabled:!!cur.enabled,
     clip_retention_days:cur.clip_retention_days,transcript_retention_days:cur.transcript_retention_days,
-    camera_id:id,config:{stream:cur.stream==null?null:cur.stream},source:cur.source};
+    camera_id:id,config:{stream:cur.stream==null?null:cur.stream}};
 }
 function audioApi(req,res,p,json){
   if(AUDIO_MODE==='missing')return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
   if(p==='/cams-audio/api/cameras')return json(Object.keys(audioDb).map(id=>({camera_id:id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,has_audio:!!audioDb[id].has_audio,source:audioDb[id].source})));
   const m=p.match(/^\/cams-audio\/api\/cameras\/([^/]+)\/audio$/);if(!m)return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
   const id=decodeURIComponent(m[1]),cur=audioDb[id];if(!cur)return send(res,404,JSON.stringify({detail:'unknown camera'}),'application/json');
-  if(req.method==='GET')return json(audioDetail(id,cur));
+  // Docs: GET returns the linked source object, or null when unlinked.
+  if(req.method==='GET')return send(res,200,JSON.stringify(cur.source==null?null:audioSource(id,cur)),'application/json');
   if(req.method!=='PATCH')return send(res,405,JSON.stringify({detail:'method not allowed'}),'application/json');
   let body='';req.on('data',d=>body+=d);req.on('end',()=>{const patch=JSON.parse(body||'{}');
     if(patch.enabled===true&&!cur.has_audio)return send(res,409,JSON.stringify({detail:'enabling requires audio'}),'application/json');
@@ -71,7 +72,8 @@ function audioApi(req,res,p,json){
     if(patch.clip_retention_days!=null)cur.clip_retention_days=patch.clip_retention_days;
     if(patch.transcript_retention_days!=null)cur.transcript_retention_days=patch.transcript_retention_days;
     if('stream' in patch)cur.stream=patch.stream;
-    json({...audioDetail(id,cur),source:cur.source});});
+    // Docs: successful PATCH returns the source object itself.
+    json(audioSource(id,cur));});
 }
 function admin(req,res,p,q,json){
   const fail=(code,detail)=>send(res,code,JSON.stringify({detail}),'application/json');

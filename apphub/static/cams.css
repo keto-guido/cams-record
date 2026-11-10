@@ -193,3 +193,43 @@ a.adm-row:hover,a.adm-row:focus-visible{border-color:var(--mn-accent);outline:no
 .cd-kind{flex:none;display:flex;align-items:center;justify-content:center;width:52px;height:52px;margin-left:auto;border-radius:50%;background:var(--mn-accent-soft);color:var(--mn-accent)}
 .cd-kind svg{width:30px;height:30px}
 @media (max-width:480px){.cd-kind{width:44px;height:44px}.cd-kind svg{width:26px;height:26px}}
+
+/* ---------- phone alert pause: bells, badge, shared menu, Alerts view ---------- */
+.camcell{position:relative;display:grid;min-width:0}
+.camcell>button.camtile{width:100%}
+button.ap-bell,button.ap-bell:hover{position:absolute;right:6px;top:6px;z-index:2;display:inline-flex;align-items:center;gap:6px;min-width:var(--mn-tap);height:var(--mn-tap);min-height:var(--mn-tap);padding:0 10px;background:rgba(0,0,0,.58);color:#fff;border:0;border-radius:22px;font:600 12px/1 var(--mn-font);cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+button.ap-bell:hover{background:rgba(0,0,0,.72)}
+button.ap-bell.on,button.ap-bell.on:hover{background:var(--mn-warn);color:#141a26}
+button.ap-bell[hidden]{display:none}
+button.ap-bell:focus-visible{outline:2px solid var(--mn-accent);outline-offset:2px}
+.ap-bell svg{flex:none;width:20px;height:20px}
+button.ap-bell-player,button.ap-bell-player:hover{top:calc(env(safe-area-inset-top,0px) + 52px);right:calc(env(safe-area-inset-right,0px) + 6px);border-radius:10px}
+.ap-bell-text{white-space:nowrap}
+.ap-badge{display:inline-flex;align-items:center;min-height:24px;padding:0 var(--mn-space-2);border-radius:var(--mn-radius-pill);background:var(--mn-warn-soft);color:var(--mn-text);border:1px solid var(--mn-warn);font:600 12px/1.6 var(--mn-font);white-space:nowrap}
+.ap-badge[hidden]{display:none}
+.ap-badge-tile{align-self:flex-start;margin:var(--mn-space-1) var(--mn-space-3) 0}
+.ap-menu{position:absolute;right:6px;top:56px;z-index:5;display:flex;flex-direction:column;min-width:168px;padding:var(--mn-space-1);background:var(--mn-surface-3);color:var(--mn-text);border:1px solid var(--mn-border-strong);border-radius:var(--mn-radius-md);box-shadow:var(--mn-shadow-2)}
+.ap-menu[hidden]{display:none}
+.ap-menu-player{top:calc(env(safe-area-inset-top,0px) + 4px);right:calc(env(safe-area-inset-right,0px) + 58px)}
+.ap-menu button,.ap-menu button:hover{justify-content:flex-start;min-height:var(--mn-tap);padding:0 var(--mn-space-3);background:transparent;color:inherit;border:0;border-radius:var(--mn-radius-sm);font:inherit;text-align:left}
+.ap-menu button:hover,.ap-menu button:focus-visible{background:var(--mn-hover);outline:none}
+.ap-menu button.on{color:var(--mn-accent);font-weight:650}
+.ap-menu button[hidden]{display:none}
+.ap-toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 20px);z-index:10;max-width:calc(100% - 32px);padding:8px 14px;transform:translateX(-50%);border-radius:20px;background:rgba(0,0,0,.8);color:#fff;font:500 13px var(--mn-font);pointer-events:none}
+.ap-toast[hidden]{display:none}
+.cam-head .ap-badge{margin-left:auto}
+.ap-title{margin:0 0 var(--mn-space-2);font-size:var(--mn-text-xl)}
+.ap-rows{display:flex;flex-direction:column;gap:var(--mn-space-2);margin-top:var(--mn-space-3)}
+.ap-row{display:flex;flex-direction:column;gap:var(--mn-space-2);padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md)}
+.ap-row.on{border-color:var(--mn-warn)}
+.ap-row .muted{margin:0}
+.ap-row-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--mn-space-2)}
+.ap-row-head svg{flex:none;width:20px;height:20px;color:var(--mn-text-muted)}
+.ap-row.on .ap-row-head svg{color:var(--mn-warn)}
+.ap-row-name{font-weight:650;color:inherit}
+.ap-row-state{margin-left:auto;color:var(--mn-text-muted);font-size:var(--mn-text-sm)}
+.ap-row.on .ap-row-state{color:var(--mn-text);font-weight:600}
+.ap-actions{display:flex;flex-wrap:wrap;gap:var(--mn-space-2)}
+.ap-actions .ghost{min-height:var(--mn-tap);padding:0 var(--mn-space-3);border-radius:var(--mn-radius-sm)}
+.ap-actions .ghost[aria-pressed=true]{border-color:var(--mn-accent);color:var(--mn-accent)}
+.ap-actions .ghost:disabled{opacity:.45;cursor:default}
