@@ -127,6 +127,40 @@ function get(user, url, headers) {
   hub.canStream = (u, n) => n !== 'shared' && only(u, n);
   assert.deepEqual(await get('bob', '/cams/api/snap/shared'), NF);
   assert.deepEqual(await get('bob', '/cams/api/stream/shared/live.mp4'), NF);
+  hub.canStream = canStream; hub.get = can;
+
+  // Snapshot frame loader (apphub 7ae112d): encode src; never leave waiters pending after a failure.
+  CAMS.push({ id: 'odd-snap', name: 'Odd', snap: 'front/yard raw' });
+  calls = [];
+  assert.equal((await get('bob', '/cams/api/snap/odd-snap')).status, 200);
+  assert.deepEqual(calls, ['/api/frame.jpeg?src=' + encodeURIComponent('front/yard raw')]);
+  assert(calls[0].includes('front%2Fyard%20raw'), 'special characters must be percent-encoded');
+
+  const realGet = http.get;
+  let failOnce = true;
+  http.get = (o, cb) => {
+    calls.push(o.path);
+    if (failOnce && String(o.path).includes('/api/frame.jpeg')) {
+      failOnce = false;
+      const up = new EventEmitter();
+      up.setTimeout = () => {};
+      up.destroy = () => {};
+      setImmediate(() => up.emit('error', new Error('go2rtc down')));
+      return up;
+    }
+    return realGet(o, cb);
+  };
+  calls = [];
+  assert.equal((await get('bob', '/cams/api/snap/open')).status, 502);
+  assert.equal(failOnce, false);
+  assert.equal((await get('bob', '/cams/api/snap/open')).status, 200);
+  assert(calls.filter(p => p.startsWith('/api/frame.jpeg')).length >= 2);
+  http.get = realGet;
+
+  http.get = () => { throw new Error('bad path'); };
+  assert.equal((await get('bob', '/cams/api/snap/open2')).status, 502);
+  http.get = realGet;
+  assert.equal((await get('bob', '/cams/api/snap/open2')).status, 200);
 
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('camera access tests passed');
