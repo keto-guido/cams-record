@@ -95,8 +95,10 @@ CREATE TABLE IF NOT EXISTS cams_detect.events (
     snapshot_hires VARCHAR(512) NULL,
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     UNIQUE KEY uq_event_uid (event_uid)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
 """
+# Production collations differ: cams_detect.events is utf8mb4_general_ci, cams_record's
+# push tables utf8mb4_unicode_ci. Keep the fixture that way so joins are tested honestly.
 
 
 def _insert_event(db, uid, *, camera_id="front-door", label="person", score=0.91,
@@ -161,7 +163,7 @@ def cams_detect_events(db):
     """Create the real production-shaped cams_detect.events table (not a mock)."""
     def setup(cur):
         cur.execute("CREATE DATABASE IF NOT EXISTS cams_detect "
-                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci")
         cur.execute("DROP TABLE IF EXISTS cams_detect.events")
         cur.execute(PROD_EVENTS_DDL)
 
@@ -459,12 +461,12 @@ def test_production_events_schema_max_score_and_event_uid(cams_detect_events, pu
     assert person["score"] == pytest.approx(0.91)
     assert person["label"] == "person"
 
-    # Lookup is by uid; the numeric PK is not a valid lookup key.
+    # Lookup is by uid; a numeric PK (legacy deep link) resolves to the same row, reported by uid.
     by_id = db.detection_event_by_id(PROD_EVENT_ID)
     assert by_id["id"] == PROD_EVENT_ID
     assert by_id["score"] == pytest.approx(0.91)
     assert by_id["has_snapshot"] is True and by_id["has_snapshot_hires"] is True
-    assert db.detection_event_by_id(str(person_pk)) is None
+    assert db.detection_event_by_id(str(person_pk)) == by_id
 
     # Claims are keyed by uid, so a claimed event drops out of the poller query.
     assert db.claim_push_event(PROD_EVENT_ID, "front-door") is True
@@ -510,10 +512,125 @@ def test_event_context_snapshot_flags_by_uid(cams_detect_events, push_env, snap,
     assert body["url"] == f"/cams/#event={uid}"
     assert body["has_snapshot"] is want_snap
     assert body["has_snapshot_hires"] is want_hires
-    # The numeric PK is not an event id: authorized 404, same as any unknown id.
-    missing = client.get(f"/cams-record/api/push/event-context/{pk}", headers=headers)
-    assert missing.status_code == 404
-    assert missing.json() == {"detail": "event not found"}
+    # Legacy deep link by numeric PK answers with the uid and the same flags.
+    legacy = client.get(f"/cams-record/api/push/event-context/{pk}", headers=headers)
+    assert legacy.status_code == 200
+    assert legacy.json() == body
+
+
+def test_fixture_collations_match_production(cams_detect_events):
+    db = cams_detect_events
+
+    def collation(schema, table, column):
+        return db.run(lambda cur: (cur.execute(
+            "SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=COALESCE(%s, DATABASE()) AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+            (schema, table, column)), cur.fetchone()[0])[1])
+
+    assert collation("cams_detect", "events", "event_uid") == "utf8mb4_general_ci"
+    assert collation(None, "push_sent_events", "event_id") == "utf8mb4_unicode_ci"
+    # A plain comparison is what production rejects; the poller must not rely on it.
+    from cams_record.db import DBUnavailable
+
+    with pytest.raises(DBUnavailable, match="[Ii]llegal mix of collations"):
+        db.run(lambda cur: cur.execute(
+            "SELECT 1 FROM cams_detect.events e JOIN push_sent_events s "
+            "ON s.event_id = CAST(e.id AS CHAR) LIMIT 1"))
+
+
+def test_event_context_legacy_numeric_pk(cams_detect_events, push_env):
+    db = cams_detect_events
+    cfg, cams, *_ = push_env
+    uid = "1794318446-1314b3"
+    pk = _insert_event(db, uid, snapshot_path="/snap/low.jpg", snapshot_hires="/snap/hd.jpg")
+    garage_pk = _insert_event(db, "1794318447-9f9f9f", camera_id="garage", snapshot_path="/snap/g.jpg")
+    client = TestClient(create_app(Service(cfg, cams, db=db), cfg))
+    bob = {"x-apphub-token": tok(sub="bob", roles=["cams"])}
+
+    r = client.get(f"/cams-record/api/push/event-context/{pk}", headers=bob)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == uid and body["url"] == f"/cams/#event={uid}"
+    assert body["has_snapshot"] is True and body["has_snapshot_hires"] is True
+
+    # Unknown numeric id and a camera the viewer may not see are the same 404.
+    assert client.get(f"/cams-record/api/push/event-context/{garage_pk + 1000}",
+                      headers=bob).status_code == 404
+    forbidden = client.get(f"/cams-record/api/push/event-context/{garage_pk}", headers=bob)
+    assert forbidden.status_code == 404 and forbidden.json() == {"detail": "event not found"}
+    eric = client.get(f"/cams-record/api/push/event-context/{garage_pk}",
+                      headers={"x-apphub-token": tok(sub="eric", roles=["cams"])})
+    assert eric.status_code == 200 and eric.json()["id"] == "1794318447-9f9f9f"
+
+
+def _poller(db, push_env, monkeypatch, **push_cfg):
+    cfg, cams, *_ = push_env
+    cfg["push"].update({"poll_enabled": True, **push_cfg})
+    svc = Service(cfg, cams, db=db)
+    sent = []
+
+    def capture(subscription, payload):
+        sent.append(payload["event_id"])
+        return True, 201
+
+    monkeypatch.setattr(svc.push, "send_raw", capture)
+    _subscribe(db, "eric", ["cams"], "eric")
+    return svc.push_notifier, sent
+
+
+def _claims(db):
+    return db.run(lambda cur: (cur.execute("SELECT event_id FROM push_sent_events"),
+                               {r[0] for r in cur.fetchall()})[1])
+
+
+def test_poller_skips_events_claimed_by_legacy_pk(cams_detect_events, push_env, monkeypatch):
+    db = cams_detect_events
+    old_uid, new_uid = "1794318400-000001", "1794318401-000002"
+    old_pk = _insert_event(db, old_uid, snapshot_path="/snap/old.jpg", age_s=20)
+    _insert_event(db, new_uid, snapshot_path="/snap/new.jpg", age_s=10)
+    # Claim written by the pre-uid release: keyed by the numeric PK.
+    assert db.claim_push_event(str(old_pk), "front-door") is True
+
+    assert [r["id"] for r in db.detection_events_for_push(time.time() - 600)] == [new_uid]
+    notifier, sent = _poller(db, push_env, monkeypatch)
+    assert notifier.run_once() == 1
+    assert sent == [new_uid]
+    assert _claims(db) == {str(old_pk), new_uid}
+    assert notifier.run_once() == 0 and sent == [new_uid]
+
+
+def test_poller_waits_for_snapshot(cams_detect_events, push_env, monkeypatch):
+    db = cams_detect_events
+    uid = "1794318446-1314b3"
+    _insert_event(db, uid, age_s=0)
+    notifier, sent = _poller(db, push_env, monkeypatch, snapshot_wait_s=5)
+
+    assert notifier.run_once() == 0 and sent == []  # snapshot not written yet
+    assert _claims(db) == set()
+    db.run(lambda cur: cur.execute(
+        "UPDATE cams_detect.events SET snapshot_path='/snap/low.jpg' WHERE event_uid=%s", (uid,)))
+    assert notifier.run_once() == 1 and sent == [uid]
+
+
+def test_poller_sends_snapshotless_event_after_wait(cams_detect_events, push_env, monkeypatch):
+    db = cams_detect_events
+    uid = "1794318446-aaaaaa"
+    _insert_event(db, uid, age_s=0)
+    notifier, sent = _poller(db, push_env, monkeypatch, snapshot_wait_s=5)
+
+    assert notifier.run_once() == 0
+    db.run(lambda cur: cur.execute(
+        "UPDATE cams_detect.events SET start_ts = UTC_TIMESTAMP(3) - INTERVAL 6 SECOND "
+        "WHERE event_uid=%s", (uid,)))
+    assert notifier.run_once() == 1 and sent == [uid]
+
+
+def test_poller_snapshot_wait_zero_sends_immediately(cams_detect_events, push_env, monkeypatch):
+    db = cams_detect_events
+    uid = "1794318446-bbbbbb"
+    _insert_event(db, uid, age_s=0)
+    notifier, sent = _poller(db, push_env, monkeypatch, snapshot_wait_s=0)
+    assert notifier.run_once() == 1 and sent == [uid]
 
 
 def test_migration_v6_widens_existing_push_sent_events(db):

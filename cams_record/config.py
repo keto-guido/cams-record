@@ -100,6 +100,9 @@ DEFAULTS: dict[str, Any] = {
         "poll_enabled": True,  # also send from the cams_detect.events poller
         "interval_s": 15,
         "lookback_s": 120,
+        # Hold an event without snapshot_path until it is this old, so the push never beats the
+        # snapshot; snapshot-less events still notify afterwards. 0 = send immediately.
+        "snapshot_wait_s": 5,
         "labels": [],  # empty = all labels; e.g. [person, car]
         # Roles saved with a subscription (refreshed whenever the app opens) stop counting after this;
         # the subscriber then only gets alerts for open cameras and cameras that name them.
@@ -192,6 +195,7 @@ ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], type]] = {
     "PUSH_POLL_ENABLED": (("push", "poll_enabled"), bool),
     "PUSH_INTERVAL_S": (("push", "interval_s"), float),
     "PUSH_LOOKBACK_S": (("push", "lookback_s"), float),
+    "PUSH_SNAPSHOT_WAIT_S": (("push", "snapshot_wait_s"), float),
     "MQTT_ENABLED": (("mqtt", "enabled"), bool),
     "MQTT_HOST": (("mqtt", "host"), str),
     "MQTT_PORT": (("mqtt", "port"), int),
@@ -434,6 +438,9 @@ def validate(cfg: dict) -> dict:
     for key in ("interval_s", "lookback_s", "ttl_s", "timeout_s", "roles_max_age_days"):
         if key in push:
             _positive(f"push.{key}", push[key])
+    wait = push.get("snapshot_wait_s", 0)
+    if isinstance(wait, bool) or not isinstance(wait, int | float) or not math.isfinite(wait) or wait < 0:
+        raise ValueError("push.snapshot_wait_s must be a number >= 0")
     labels = push.get("labels") or []
     if not isinstance(labels, list) or any(not isinstance(x, str) or not x for x in labels):
         raise ValueError("push.labels must be a list of non-empty strings")
