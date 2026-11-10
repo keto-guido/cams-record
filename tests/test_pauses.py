@@ -85,7 +85,7 @@ class FakeDB:
     def push_subscriptions_for_user(self, user_sub):
         return [s for s in self.subs if s["user_sub"] == user_sub]
 
-    def detection_events_for_push(self, since, limit=200):
+    def detection_events_for_push(self, since, limit=200, snapshot_wait_s=0):
         return [e for e in self.events if e["id"] not in self.claimed and e["start_ts"] >= since][:limit]
 
     def touch_push_subscription(self, endpoint_hash):
