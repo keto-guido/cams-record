@@ -279,24 +279,45 @@ side) that the copies are identical.
 
 The Cameras app (`/cams`) has an **Admin** tab for users with an `auth.admin_roles` role (default
 `admin`); everyone else never sees it, and cams-record refuses its API (`/cams-record/api/admin/*`)
-with 403.
+with 403. This is the one place to manage a camera object.
 
-- **List**: every camera with on/off, who can see it, what is recorded, detection state and any
-  recorder that is not recording; a banner with the mode and, in shadow mode, every difference
-  reported by cams-record and cams-detect.
-- **Add / edit**: ID (new cameras only; it never changes), name, on/off, main/sub/snapshot go2rtc
-  streams (suggested from go2rtc's stream list, `go2rtc.api_url`), which stream does each job
-  ("Use defaults": low resolution for live and detection, high resolution for recording, HD live and
-  checking detections), who can see it (everyone, or named people and roles; admins always),
-  detection on/off, and per-camera retention. Masks and zones open cams-detect's mask editor.
+- **List**: one row per cams_config camera (never a separate row for `*-main` / HD helpers). Each row
+  shows the display name, id, low-res and HD stream names, on/off, who can see it, what is recorded,
+  detection state and any recorder that is not recording; a banner with the mode and, in shadow mode,
+  every difference reported by cams-record and cams-detect.
+- **Per-camera page**: sections for **Name**, **Streams** (low-res sub + HD main + optional snapshot;
+  advanced "which stream does what" is collapsed), **Detection**, **Masks** (link to cams-detect's
+  editor), **Access**, **Recording** retention, and **Audio** (separate service; see below).
 - **History**: who changed what and when, from `config_audit`.
 - **Safety**: the form is read-only while `camera_source` is `file` (nothing would read the changes).
   Every save carries the revision the form was loaded at, so a change made elsewhere in the meantime
   is reported instead of overwritten. Settings the form does not show (masks, zones, other detection
   settings, notification rules, connector settings) are kept as they are.
 
-cams-detect's pages (Cameras, Masks, Events) link to the Admin tab. In `db` mode its Cameras page no
-longer adds or renames cameras; it keeps the detection switch and the mask editor.
+### Audio (cams-audio, not cams_config)
+
+Audio listening and retention are owned by `keto-guido/cams-audio` and are **not** stored in
+`cams_config`. The Admin per-camera page mounts a self-contained panel (`apphub/static/camera_audio.js`)
+that calls the same-origin `/cams-audio` JSON API with the App Hub `apphub_token` cookie:
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/cams-audio/api/cameras` | `[{camera_id, name, audio:{listening, clip_retention_days, transcript_retention_days, stream, has_audio}}]` |
+| GET | `/cams-audio/api/cameras/{id}/audio` | one camera's audio object |
+| PATCH | `/cams-audio/api/cameras/{id}/audio` | partial update; retention integers 1–3650 |
+
+`has_audio` decides whether the Audio section appears. `stream` is read-only (e.g. back-yard uses
+`back-yard-raw`). If the list GET returns 404/502 or the network fails, the panel shows
+"Audio service not installed". A 409 on PATCH (listening while `has_audio` is false) is shown inline.
+
+### cams-detect Cameras / Masks / Events pages
+
+cams-detect's pages link to the Admin tab. In `db` mode its Cameras page no longer adds or renames
+cameras; it keeps the detection switch and the mask editor. **Required in cams-detect:** when listing
+cameras, derive rows from cams_config (or the detect camera registry), one object per camera with
+`main_stream` / HD as a property — do **not** list go2rtc `*-main` or owned `*-raw` aliases as
+separate "not a camera yet" entries. Prefer linking detection toggles and masks into this Admin
+per-camera page so admins are not split across two tabs.
 
 ## Phases
 

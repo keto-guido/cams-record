@@ -3,7 +3,13 @@
 // Screenshot fixture server; never deploy or require this file from cams.js.
 const http=require('http'),fs=require('fs'),path=require('path'),os=require('os'),Module=require('module');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cams-preview-'));
-const cameras=[{id:'front-door',name:'Front Door'},{id:'back-door',name:'Back Door'}];
+const cameras=[
+  {id:'front-door',name:'Front Door'},
+  {id:'back-door',name:'Back Door'},
+  {id:'front-yard',name:'Front Yard'},
+  {id:'back-yard',name:'Back Yard',snap:'back-yard-raw'},
+  {id:'mckinley-webcam',name:'McKinley Webcam'},
+];
 fs.writeFileSync(path.join(dir,'cams.json'),JSON.stringify(cameras));
 const lib=path.join(dir,'lib.js'),resolve=Module._resolveFilename;
 Module._resolveFilename=function(request,parent,...rest){if(request==='./lib'&&parent.filename===path.join(__dirname,'cams.js'))return lib;return resolve.call(this,request,parent,...rest);};
@@ -27,17 +33,41 @@ const epoch=v=>Number.isFinite(+v)?+v:Date.parse(v)/1000;
 // Stand-in design tokens for when keto-guido/apphub is not checked out next to this repo (values approximate the hub's dark theme).
 const TOKENS=':root{color-scheme:dark;--mn-bg:#121417;--mn-surface-1:#1b1e23;--mn-surface-2:#23272d;--mn-surface-3:#2b3037;--mn-border:#34383e;--mn-border-strong:#4a5059;--mn-text:#edf0f5;--mn-text-muted:#969ba5;--mn-accent:#a18af8;--mn-accent-soft:#2c2547;--mn-on-accent:#14111f;--mn-hover:#262a31;--mn-danger:#f2777a;--mn-danger-solid:#d64545;--mn-on-danger:#fff;--mn-warn:#e8b04a;--mn-success:#5cc98a;--mn-live:#e5484d;--mn-font:system-ui,sans-serif;--mn-text-sm:13px;--mn-text-md:15px;--mn-text-lg:18px;--mn-text-xl:22px;--mn-space-1:4px;--mn-space-2:8px;--mn-space-3:12px;--mn-space-4:16px;--mn-space-6:24px;--mn-radius-sm:6px;--mn-radius-md:10px;--mn-radius-lg:14px;--mn-radius-pill:999px;--mn-tap:44px;--mn-shadow-1:0 1px 2px rgba(0,0,0,.4);--mn-gutter:16px;--mn-content-max:1000px;--mn-bar-height:48px;--mn-subnav-height:44px}body{background:var(--mn-bg);color:var(--mn-text);font-family:var(--mn-font)}.mn-topbar{display:flex;align-items:center;height:var(--mn-bar-height);padding:0 var(--mn-gutter);border-bottom:1px solid var(--mn-border)}.mn-brand{color:inherit;text-decoration:none;font-weight:700}.mn-subnav{display:flex;gap:var(--mn-space-4);padding:0 var(--mn-gutter);border-bottom:1px solid var(--mn-border)}.mn-subnav a{display:flex;align-items:center;min-height:var(--mn-subnav-height);color:var(--mn-text-muted);text-decoration:none}.mn-subnav a[aria-current=page]{color:var(--mn-text);box-shadow:inset 0 -2px var(--mn-accent)}.mn-subnav a[hidden]{display:none}';
 const MODE=process.env.PREVIEW_MODE||'shadow';
-const st=(main,sub)=>({main:{go2rtc_name:main,width:2560,height:1440,codec:'h264',fps:15},sub:{go2rtc_name:sub,width:640,height:360,codec:'h264',fps:15}});
+const AUDIO_MODE=process.env.PREVIEW_AUDIO||'installed'; // installed | missing
+const st=(main,sub,extra={})=>({main:{go2rtc_name:main,width:2560,height:1440,codec:'h264',fps:15},sub:{go2rtc_name:sub,width:640,height:360,codec:'h264',fps:15},...extra});
 const adminDb={revision:3,history:{},cams:{
   'front-door':{id:'front-door',name:'Front Door',enabled:true,connector_type:'go2rtc',connector:{},visibility:'everyone',users:[],roles:[],sort_order:0,streams:st('front-door-main','front-door'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main','sub']},detection:{enabled:true,zones:{porch:[[0,.5],[1,.5],[1,1]]}},recording:{main_days:7},notify:[]},
-  'back-door':{id:'back-door',name:'Back Door',enabled:true,connector_type:'go2rtc',connector:{},visibility:'restricted',users:['ann'],roles:['family'],sort_order:1,streams:st('back-door-main','back-door'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main']},detection:{enabled:false},recording:null,notify:[]},
-  'driveway':{id:'driveway',name:'Driveway',enabled:false,connector_type:'go2rtc',connector:{},visibility:'restricted',users:[],roles:[],sort_order:2,streams:st('driveway-main','driveway'),use:{live:['sub'],record:['main','sub']},detection:null,recording:null,notify:[]}}};
+  'back-door':{id:'back-door',name:'Back Door',enabled:true,connector_type:'go2rtc',connector:{},visibility:'restricted',users:['ann'],roles:['family'],sort_order:1,streams:st('back-door-main','back-door'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main']},detection:{enabled:true},recording:null,notify:[]},
+  'front-yard':{id:'front-yard',name:'Front Yard',enabled:true,connector_type:'go2rtc',connector:{},visibility:'everyone',users:[],roles:[],sort_order:2,streams:st('front-yard-main','front-yard'),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['sub'],record:['main','sub']},detection:{enabled:true},recording:null,notify:[]},
+  'back-yard':{id:'back-yard',name:'Back Yard',enabled:true,connector_type:'go2rtc',connector:{},visibility:'everyone',users:[],roles:[],sort_order:3,streams:st('back-yard-main','back-yard-raw',{snap:{go2rtc_name:'back-yard-raw'}}),use:{live:['sub'],live_hd:['main'],detect:['sub'],verify:['main'],snapshot:['snap'],record:['main','sub']},detection:{enabled:true},recording:null,notify:[]},
+  'mckinley-webcam':{id:'mckinley-webcam',name:'McKinley Webcam',enabled:true,connector_type:'go2rtc',connector:{},visibility:'restricted',users:[],roles:[],sort_order:4,streams:{sub:{go2rtc_name:'mckinley-webcam',width:1280,height:720,codec:'h264',fps:5}},use:{live:['sub'],detect:['sub'],snapshot:['sub'],record:['sub']},detection:{enabled:false},recording:null,notify:[]}}};
 adminDb.history['front-door']=[{at:new Date(Date.now()-86400e3).toISOString(),actor:'eric',action:'update',revision:3,before:{recording:null},after:{recording:{main_days:7}}},{at:new Date(Date.now()-3*86400e3).toISOString(),actor:'import',action:'import',revision:1,before:null,after:{}}];
+const audioDb={
+  'front-door':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
+  'back-door':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
+  'front-yard':{listening:false,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:true},
+  'back-yard':{listening:true,clip_retention_days:90,transcript_retention_days:365,stream:'back-yard-raw',has_audio:true},
+  'mckinley-webcam':{listening:false,clip_retention_days:90,transcript_retention_days:365,stream:null,has_audio:false},
+};
+function audioApi(req,res,p,json){
+  if(AUDIO_MODE==='missing')return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
+  if(p==='/cams-audio/api/cameras')return json(Object.keys(audioDb).map(id=>({camera_id:id,name:(adminDb.cams[id]&&adminDb.cams[id].name)||id,audio:{...audioDb[id]}})));
+  const m=p.match(/^\/cams-audio\/api\/cameras\/([^/]+)\/audio$/);if(!m)return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
+  const id=decodeURIComponent(m[1]),cur=audioDb[id];if(!cur)return send(res,404,JSON.stringify({detail:'unknown camera'}),'application/json');
+  if(req.method==='GET')return json({...cur});
+  if(req.method!=='PATCH')return send(res,405,JSON.stringify({detail:'method not allowed'}),'application/json');
+  let body='';req.on('data',d=>body+=d);req.on('end',()=>{const patch=JSON.parse(body||'{}');
+    if(patch.listening===true&&!cur.has_audio)return send(res,409,JSON.stringify({detail:'listening requires has_audio'}),'application/json');
+    for(const k of ['clip_retention_days','transcript_retention_days']){
+      if(patch[k]!=null&&(!Number.isInteger(patch[k])||patch[k]<1||patch[k]>3650))return send(res,422,JSON.stringify({detail:k+' must be 1..3650'}),'application/json');
+    }
+    Object.assign(cur,patch);json({...cur});});
+}
 function admin(req,res,p,q,json){
   const fail=(code,detail)=>send(res,code,JSON.stringify({detail}),'application/json');
   const list=()=>Object.values(adminDb.cams).sort((a,b)=>a.sort_order-b.sort_order);
   const m=p.match(/^\/cams-record\/api\/admin\/cameras(?:\/([^/]+))?$/);
-  if(p==='/cams-record/api/admin/streams')return json({reachable:true,streams:['back-door','back-door-main','driveway','driveway-main','front-door','front-door-main','garage','garage-main'].map(name=>({name,used_by:list().filter(c=>Object.values(c.streams).some(s=>s.go2rtc_name===name)).map(c=>c.id)}))});
+  if(p==='/cams-record/api/admin/streams')return json({reachable:true,streams:['back-door','back-door-main','back-yard','back-yard-main','back-yard-raw','front-door','front-door-main','front-yard','front-yard-main','mckinley-webcam'].map(name=>({name,used_by:list().filter(c=>Object.values(c.streams).some(s=>s.go2rtc_name===name)).map(c=>c.id)}))});
   if(!m)return fail(404,'not found');
   const id=m[1]&&decodeURIComponent(m[1]);
   if(req.method==='GET'&&!id)return json({revision:adminDb.revision,mode:MODE,editable:MODE!=='file',camera_source:{mode:MODE,revision:adminDb.revision,origin:'db',differences:MODE==='shadow'?[]:undefined,registry:MODE==='db'?{enabled:true,error:null}:undefined},cameras:list().map(c=>({...c,recording_state:c.enabled?{main:'recording',sub:c.id==='back-door'?'backoff':'recording'}:{}}))});
@@ -74,6 +104,8 @@ const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://local
   if(p==='/cams-record/api/clip'||p==='/cams-record/api/export'){const name=(q.get('camera')||q.get('cam'))+'_preview_'+(q.get('quality')||'sub')+'.mp4',mp4=()=>send(res,200,clipMp4,'video/mp4',{'Content-Disposition':(q.get('download')==='0'?'inline':'attachment')+'; filename="'+name+'"'});return q.get('quality')==='main'?setTimeout(mp4,1500):mp4();}
   // Camera management (Admin tab): in-memory camera objects. PREVIEW_MODE=file|shadow|db (default shadow).
   if(p.startsWith('/cams-record/api/admin/'))return admin(req,res,p,q,json);
+  // cams-audio mock. PREVIEW_AUDIO=installed|missing (default installed).
+  if(p.startsWith('/cams-audio/'))return audioApi(req,res,p,json);
   if(p==='/cams-detect/api/status')return json({service:{camera_source:{mode:MODE,differences:MODE==='shadow'?['back-door: decode_fps differ between cameras.yaml and cams_config']:undefined,fallback_to_files:false,skipped:[]}}});
   if(p.startsWith('/cams-record/'))return send(res,404,'Preview has no media files');
   return app.handle(req,res,{user:'Preview',csrf:'preview'},p,u);

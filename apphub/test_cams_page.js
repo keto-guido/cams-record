@@ -20,8 +20,9 @@ for (const id of ['back','play','forward','det-prev','det-next','out','in','cale
 for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-date','tl-range']) assert(html.includes('id="'+id+'"'));
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
-assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('cams.js?v=19'));
-assert(html.includes('cams.css?v=15'));
+assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('camera_audio.js?v=1'));
+assert(html.indexOf('camera_audio.js?v=1') < html.indexOf('cams.js?v=20'));
+assert(html.includes('cams.css?v=16'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
 assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
 assert(html.includes('apple-mobile-web-app-capable'));
@@ -31,9 +32,12 @@ assert(html.includes('<nav class="mn-subnav cams-tabs" id="cams-tabs"'));
 for (const view of ['grid','det']) assert(html.includes('class="cams-tab" data-view="'+view+'"'));
 // Camera management is part of the same app: an Admin tab, hidden until cams-record confirms an admin.
 assert(html.includes('<a class="cams-tab" data-view="admin" href="#admin" id="tab-admin" hidden>Admin</a>'));
-for (const id of ['view-admin','view-admin-edit','adm-list','adm-banner','adm-form','adm-history','f-id','f-name','f-enabled','f-main','f-sub','f-snap','f-use','f-defaults','f-vis-everyone','f-vis-restricted','f-users','f-roles','f-detect','f-masks','f-main-days','f-sub-days','adm-save','adm-delete'])
+for (const id of ['view-admin','view-admin-edit','adm-list','adm-banner','adm-form','adm-history','adm-intro','f-id','f-name','f-enabled','f-main','f-sub','f-snap','f-use','f-defaults','f-advanced','f-vis-everyone','f-vis-restricted','f-users','f-roles','f-detect','f-detect-status','f-masks','f-masks-none','f-audio-panel','f-main-days','f-sub-days','adm-save','adm-delete','sec-name','sec-streams','sec-detection','sec-masks','sec-access','sec-recording'])
   assert(html.includes('id="'+id+'"'), id);
+assert(html.includes('>Name<') && html.includes('>Streams<') && html.includes('>Detection<') && html.includes('>Masks<') && html.includes('>Access<') && html.includes('>Recording<'));
+assert(html.includes('Low-res stream (sub)') && html.includes('HD stream (main)'));
 assert(/id="view-admin" hidden/.test(html) && /id="view-admin-edit" hidden/.test(html) && /id="adm-add" hidden/.test(html));
+
 assert(!/Back to Dashboard|backdash|action="\/logout"|App Hub/.test(html));
 assert(html.includes('id="tl-det-prev" aria-label="Previous detection"'));
 assert(html.includes('id="tl-det-next" aria-label="Next detection"'));
@@ -52,8 +56,14 @@ assert(client.includes('encodeURIComponent(eid)'));
 // Admin writes carry the loaded revision, are JSON, and never build HTML from camera data.
 assert(client.includes("ADM = CR + '/api/admin'") && client.includes('expect_revision: adm.revision'));
 assert(client.includes("'Content-Type': 'application/json'"));
+assert(client.includes('CamsAudio.mount') && client.includes("basePath: '/cams-audio'"));
+assert(client.includes('presentCamera') && client.includes('streams_view'));
+assert(client.includes('Low-res ') && client.includes('HD '));
 const adminPart = client.split('// ---------- camera management')[1].split('// ---------- routing')[0];
 assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(adminPart), 'admin view must use textContent only');
+const audio = fs.readFileSync(path.join(__dirname, 'static', 'camera_audio.js'), 'utf8');
+assert(audio.includes("DEFAULT_BASE = '/cams-audio'") && audio.includes('has_audio') && audio.includes('Audio service not installed'));
+assert(audio.includes('RETENTION_MAX = 3650') && audio.includes("method: 'PATCH'"));
 // Detection rows: zoomed thumbnail with a fallback to the full snapshot, and a type icon.
 const rowPart = client.split('function evRow(e)')[1].split('function EvList')[0];
 assert(rowPart.includes("'/thumb.jpg'") && rowPart.includes("'/snapshot.jpg'") && rowPart.includes("addEventListener('error'"));
@@ -73,8 +83,13 @@ app.handle({method:'GET'}, {done:r=>{
       assert.equal(r3.status,200);
       assert(r3.type.startsWith('application/javascript'));
       assert.equal(r3.headers['Cache-Control'],'private, max-age=86400');
-      fs.rmSync(dir,{recursive:true});
-      console.log('camera page tests passed');
+      app.handle({method:'GET'}, {done:r4=>{
+        assert.equal(r4.status,200);
+        assert.equal(r4.type,'application/javascript; charset=utf-8');
+        assert(String(r4.body).includes('CamsAudio') || Buffer.isBuffer(r4.body));
+        fs.rmSync(dir,{recursive:true});
+        console.log('camera page tests passed');
+      }}, {user:'test'}, '/cams/static/camera_audio.js', new URL('http://localhost/cams/static/camera_audio.js'));
     }}, {user:'test'}, '/cams/static/hls.min.js', new URL('http://localhost/cams/static/hls.min.js'));
   }}, {user:'test'}, '/cams/manifest.webmanifest', new URL('http://localhost/cams/manifest.webmanifest'));
 }}, {user:'test'}, '/cams/sw.js', new URL('http://localhost/cams/sw.js'));
