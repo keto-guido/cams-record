@@ -358,13 +358,15 @@ class Database:
     def detection_events_for_push(self, since: float, limit: int = 200) -> list[dict]:
         """Recent cams_detect events that have not yet been claimed for Web Push.
 
-        Production ``cams_detect.events`` uses string ``id`` values and ``max_score``
-        (not ``score``).
+        Production ``cams_detect.events`` has a BIGINT auto-increment ``id`` PK and the
+        string event id (MQTT / API / push, e.g. ``1793897909-7de0b7``) in
+        ``event_uid``; the score column is ``max_score`` (not ``score``). Push claims
+        in ``push_sent_events.event_id`` are keyed by that uid.
         """
         def q(cur):
-            cur.execute("""SELECT e.id, e.camera_id, e.label, e.max_score, e.start_ts, e.end_ts
+            cur.execute("""SELECT e.event_uid, e.camera_id, e.label, e.max_score, e.start_ts, e.end_ts
                            FROM cams_detect.events e
-                           LEFT JOIN push_sent_events s ON s.event_id = e.id
+                           LEFT JOIN push_sent_events s ON s.event_id = e.event_uid
                            WHERE s.event_id IS NULL AND e.start_ts >= %s
                            ORDER BY e.start_ts ASC, e.id ASC LIMIT %s""",
                         (to_dt(since), int(limit)))
@@ -376,16 +378,24 @@ class Database:
         return self.run(q)
 
     def detection_event_by_id(self, event_id: str) -> dict | None:
+        """Look up one cams_detect event by its string uid (``events.event_uid``).
+
+        The returned ``id`` is the uid, never the numeric PK. ``has_snapshot`` /
+        ``has_snapshot_hires`` are true only when the path columns are non-NULL.
+        """
         def q(cur):
-            cur.execute("""SELECT id, camera_id, label, max_score, start_ts, end_ts
-                           FROM cams_detect.events WHERE id=%s""", (str(event_id),))
+            cur.execute("""SELECT event_uid, camera_id, label, max_score, start_ts, end_ts,
+                                  snapshot_path, snapshot_hires
+                           FROM cams_detect.events WHERE event_uid=%s""", (str(event_id),))
             r = cur.fetchone()
             if not r:
                 return None
             return {"id": str(r[0]), "camera_id": r[1], "label": r[2],
                     "score": float(r[3]) if r[3] is not None else None,
                     "start_ts": from_dt(r[4]),
-                    "end_ts": from_dt(r[5]) if r[5] is not None else None}
+                    "end_ts": from_dt(r[5]) if r[5] is not None else None,
+                    "has_snapshot": r[6] is not None,
+                    "has_snapshot_hires": r[7] is not None}
         return self.run(q)
 
     def upsert_push_subscription(self, user_sub: str, sub: dict, roles=None) -> None:

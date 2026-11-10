@@ -119,11 +119,13 @@ Production `cams_detect.events` columns used by the poller / event-context path:
 
 | column | type (production) | notes |
 |---|---|---|
-| `id` | string, e.g. `1793897909-7de0b7` | **not** an integer; stored in `push_sent_events.event_id` as `VARCHAR(64)` (migration v6) |
+| `id` | `BIGINT` auto-increment PK | internal only; **never** sent in pushes or used for lookups |
+| `event_uid` | `VARCHAR(64)` UNIQUE, e.g. `1793897909-7de0b7` | the MQTT / API / push event id; the poller emits it, `push_sent_events.event_id` (`VARCHAR(64)`, migration v6) stores it, and `/api/push/event-context/{event_id}` looks it up |
 | `camera_id` | string | |
 | `label` | string | |
 | `max_score` | float | **not** `score` |
 | `start_ts` / `end_ts` | datetime | |
+| `snapshot_path` / `snapshot_hires` | string or NULL | event-context only reports `has_snapshot` / `has_snapshot_hires` booleans (no bytes, no image URLs) |
 
 Migration **v6** is a forward `ALTER` for installs that already applied empty v5 tables
 (`event_id BIGINT` → `VARCHAR(64)`). The webhook also accepts `max_score` (preferred) or

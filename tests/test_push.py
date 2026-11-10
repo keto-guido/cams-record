@@ -79,18 +79,39 @@ def _sub_body(endpoint="https://fcm.googleapis.com/fcm/send/testdevice", *, live
     return {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
 
 
-# Production cams_detect.events shape (string id, max_score — not score).
+# Production cams_detect.events shape (keto-guido/cams-detect storage_mariadb.py):
+# ``id`` is a BIGINT auto-increment PK; the string event id used by MQTT / API /
+# push payloads lives in ``event_uid``. Score column is ``max_score`` (not score).
 PROD_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS cams_detect.events (
-    id VARCHAR(64) NOT NULL PRIMARY KEY,
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    event_uid VARCHAR(64) NOT NULL,
     camera_id VARCHAR(64) NOT NULL,
     label VARCHAR(64) NOT NULL,
     max_score DOUBLE NULL,
     start_ts DATETIME(3) NOT NULL,
     end_ts DATETIME(3) NULL,
-    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    snapshot_path VARCHAR(512) NULL,
+    snapshot_hires VARCHAR(512) NULL,
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uq_event_uid (event_uid)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
+
+
+def _insert_event(db, uid, *, camera_id="front-door", label="person", score=0.91,
+                  age_s=0, snapshot_path=None, snapshot_hires=None) -> int:
+    """Insert one production-shaped event and return its numeric auto-increment PK."""
+    def q(cur):
+        cur.execute(
+            """INSERT INTO cams_detect.events
+                   (event_uid, camera_id, label, max_score, start_ts, end_ts,
+                    snapshot_path, snapshot_hires, updated_at)
+               VALUES (%s, %s, %s, %s, UTC_TIMESTAMP(3) - INTERVAL %s SECOND, NULL,
+                       %s, %s, UTC_TIMESTAMP(3))""",
+            (uid, camera_id, label, score, int(age_s), snapshot_path, snapshot_hires))
+        return cur.lastrowid
+    return db.run(q)
 
 
 # front-door is open to every cams user; garage only to eric and the family role.
@@ -388,6 +409,8 @@ def test_event_context_string_id(db, push_env, monkeypatch):
     assert r.json()["id"] == PROD_EVENT_ID
     assert r.json()["url"] == f"/cams/#event={PROD_EVENT_ID}"
     assert "snapshot" not in r.json()
+    # Rows without the flags (older callers / mocks) report no snapshots.
+    assert r.json()["has_snapshot"] is False and r.json()["has_snapshot_hires"] is False
 
 
 def test_webhook_rejects_jwt_as_public_send(client_nodb):
@@ -400,8 +423,8 @@ def test_webhook_rejects_jwt_as_public_send(client_nodb):
     assert r.status_code == 401
 
 
-def test_production_events_schema_max_score_and_string_ids(cams_detect_events, push_env, monkeypatch):
-    """Query the real production events shape (string id + max_score), not a mocked SELECT."""
+def test_production_events_schema_max_score_and_event_uid(cams_detect_events, push_env, monkeypatch):
+    """Query the real production events shape (BIGINT id + event_uid + max_score)."""
     db = cams_detect_events
     cfg, cams, *_ = push_env
     # Confirm schema v6 widened event_id (forward migration from BIGINT).
@@ -412,20 +435,14 @@ def test_production_events_schema_max_score_and_string_ids(cams_detect_events, p
     assert col[0].lower() in ("varchar", "char")
     assert int(col[1] or 0) >= 32
 
-    def insert(cur):
-        cur.execute(
-            """INSERT INTO cams_detect.events (id, camera_id, label, max_score, start_ts, end_ts, updated_at)
-               VALUES (%s, %s, %s, %s, UTC_TIMESTAMP(3), NULL, UTC_TIMESTAMP(3))""",
-            (PROD_EVENT_ID, "front-door", "person", 0.91),
-        )
-        # A second event with a numeric-looking id must also stay a string.
-        cur.execute(
-            """INSERT INTO cams_detect.events (id, camera_id, label, max_score, start_ts, end_ts, updated_at)
-               VALUES (%s, %s, %s, %s, UTC_TIMESTAMP(3) - INTERVAL 30 SECOND, NULL, UTC_TIMESTAMP(3))""",
-            ("42", "front-door", "car", 0.5),
-        )
-
-    db.run(insert)
+    # Occupy a few PKs first so the numeric id can never coincide with anything uid-like.
+    for i in range(3):
+        _insert_event(db, f"filler-{i}", age_s=3600)
+    person_pk = _insert_event(db, PROD_EVENT_ID, snapshot_path="/snap/a.jpg",
+                              snapshot_hires="/snap/a_hd.jpg")
+    car_uid = "1793897879-0a1b2c"
+    car_pk = _insert_event(db, car_uid, label="car", score=0.5, age_s=30)
+    assert isinstance(person_pk, int) and person_pk > 0
 
     # The old wrong column name must fail against this real table.
     from cams_record.db import DBUnavailable
@@ -433,24 +450,27 @@ def test_production_events_schema_max_score_and_string_ids(cams_detect_events, p
     with pytest.raises(DBUnavailable, match="Unknown column.*score"):
         db.run(lambda cur: cur.execute("SELECT e.score FROM cams_detect.events e LIMIT 1"))
 
+    # Poller emits uids (never numeric PKs).
     rows = db.detection_events_for_push(time.time() - 600)
     ids = {r["id"] for r in rows}
-    assert PROD_EVENT_ID in ids
-    assert "42" in ids
-    assert all(isinstance(r["id"], str) for r in rows)
+    assert ids == {PROD_EVENT_ID, car_uid}
+    assert str(person_pk) not in ids and str(car_pk) not in ids
     person = next(r for r in rows if r["id"] == PROD_EVENT_ID)
     assert person["score"] == pytest.approx(0.91)
     assert person["label"] == "person"
 
+    # Lookup is by uid; the numeric PK is not a valid lookup key.
     by_id = db.detection_event_by_id(PROD_EVENT_ID)
     assert by_id["id"] == PROD_EVENT_ID
     assert by_id["score"] == pytest.approx(0.91)
+    assert by_id["has_snapshot"] is True and by_id["has_snapshot_hires"] is True
+    assert db.detection_event_by_id(str(person_pk)) is None
 
+    # Claims are keyed by uid, so a claimed event drops out of the poller query.
     assert db.claim_push_event(PROD_EVENT_ID, "front-door") is True
     assert db.claim_push_event(PROD_EVENT_ID, "front-door") is False
-    # After claim, poller query must not return it again.
     remaining = {r["id"] for r in db.detection_events_for_push(time.time() - 600)}
-    assert PROD_EVENT_ID not in remaining
+    assert remaining == {car_uid}
 
     # Event-context HTTP path against the real table.
     svc = Service(cfg, cams, db=db)
@@ -458,8 +478,42 @@ def test_production_events_schema_max_score_and_string_ids(cams_detect_events, p
     r = client.get(f"/cams-record/api/push/event-context/{PROD_EVENT_ID}",
                    headers={"x-apphub-token": tok(roles=["cams"])})
     assert r.status_code == 200
-    assert r.json()["id"] == PROD_EVENT_ID
-    assert r.json()["score"] == pytest.approx(0.91)
+    body = r.json()
+    assert body["id"] == PROD_EVENT_ID
+    assert body["score"] == pytest.approx(0.91)
+    assert body["has_snapshot"] is True and body["has_snapshot_hires"] is True
+    assert "snapshot_path" not in body and "snapshot_hires" not in body
+
+
+@pytest.mark.parametrize(("snap", "hires", "want_snap", "want_hires"), [
+    (None, None, False, False),
+    ("/snap/low.jpg", None, True, False),
+    ("/snap/low.jpg", "/snap/hd.jpg", True, True),
+])
+def test_event_context_snapshot_flags_by_uid(cams_detect_events, push_env, snap, hires, want_snap, want_hires):
+    db = cams_detect_events
+    cfg, cams, *_ = push_env
+    uid = "1794318446-1314b3"
+    pk = _insert_event(db, uid, snapshot_path=snap, snapshot_hires=hires)
+
+    row = db.detection_event_by_id(uid)
+    assert row is not None and row["id"] == uid
+    assert row["has_snapshot"] is want_snap
+    assert row["has_snapshot_hires"] is want_hires
+
+    client = TestClient(create_app(Service(cfg, cams, db=db), cfg))
+    headers = {"x-apphub-token": tok(roles=["cams"])}
+    r = client.get(f"/cams-record/api/push/event-context/{uid}", headers=headers)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == uid
+    assert body["url"] == f"/cams/#event={uid}"
+    assert body["has_snapshot"] is want_snap
+    assert body["has_snapshot_hires"] is want_hires
+    # The numeric PK is not an event id: authorized 404, same as any unknown id.
+    missing = client.get(f"/cams-record/api/push/event-context/{pk}", headers=headers)
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "event not found"}
 
 
 def test_migration_v6_widens_existing_push_sent_events(db):

@@ -413,7 +413,10 @@ def create_app(service, cfg: dict):
 
     @r.get("/api/push/event-context/{event_id}")
     def push_event_context(event_id: str, who: Viewer = Depends(viewer)):
-        """Authorized deep-link helper: metadata only (no snapshots/images)."""
+        """Authorized deep-link helper: metadata only (no snapshot bytes or image URLs).
+
+        ``has_snapshot`` / ``has_snapshot_hires`` only say whether cams-detect stored one.
+        """
         try:
             eid = normalize_event_id(event_id)
         except PushError as exc:
@@ -436,6 +439,8 @@ def create_app(service, cfg: dict):
             "score": row["score"],
             "start_ts": row["start_ts"],
             "end_ts": row["end_ts"],
+            "has_snapshot": bool(row.get("has_snapshot")),
+            "has_snapshot_hires": bool(row.get("has_snapshot_hires")),
             "url": f"/cams/#event={quote(str(row['id']), safe='')}",
         }
 
