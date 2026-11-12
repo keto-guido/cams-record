@@ -55,9 +55,28 @@ module.exports = function (C) {
     if (c.buf && Date.now() - c.t < 3000) return out(c.buf);
     if (c.waiters) return c.waiters.push(out);
     c.waiters = [out];
-    const done = b => { const w = c.waiters; c.waiters = null; if (b) { c.buf = b; c.t = Date.now(); } w.forEach(f => f(b || null)); };
-    const up = http.get({ ...G, path: '/api/frame.jpeg?src=' + src }, ur => { const a = []; ur.on('data', d => a.push(d)); ur.on('end', () => done(ur.statusCode === 200 ? Buffer.concat(a) : null)); });
-    up.setTimeout(15e3, () => up.destroy(new Error('timeout'))); up.on('error', () => done(null));
+    // Always clear waiters exactly once — a thrown/rejected http.get or timeout must not wedge later snaps.
+    let settled = false;
+    const done = b => {
+      if (settled) return;
+      settled = true;
+      const w = c.waiters; c.waiters = null;
+      if (b) { c.buf = b; c.t = Date.now(); }
+      (w || []).forEach(f => f(b || null));
+    };
+    let up;
+    try {
+      up = http.get({ ...G, path: '/api/frame.jpeg?src=' + encodeURIComponent(src) }, ur => {
+        const a = [];
+        ur.on('data', d => a.push(d));
+        ur.on('end', () => done(ur.statusCode === 200 ? Buffer.concat(a) : null));
+        ur.on('error', () => done(null));
+      });
+    } catch (e) {
+      return done(null);
+    }
+    up.setTimeout(15e3, () => { up.destroy(new Error('timeout')); done(null); });
+    up.on('error', () => done(null));
   }
   // go2rtc hands out each HLS segment/init only once; players (Safari, Chrome) often re-request the same one,
   // which then comes back empty/garbled -> "could not parse". Cache them briefly so repeats get identical bytes.
