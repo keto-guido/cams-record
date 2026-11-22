@@ -1,9 +1,21 @@
 /* Cameras (/cams/). Tokens: /shared/nav.css, loaded before style.css and this file. Contract: DESIGN.md in keto-guido/apphub.
    style.css styles bare <button>, including :hover, so every custom button below resets both states. */
 
-/* ---------- push notification control ---------- */
-.push-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--mn-space-3);margin:0 0 var(--mn-space-3);padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md)}
-.push-bar[hidden]{display:none}
+/* ---------- notification settings (#settings) ---------- */
+a.cams-tab.cams-gear{margin-left:auto;gap:6px}
+.cams-gear svg{flex:none;width:18px;height:18px}
+@media (max-width:420px){.cams-gear-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}}
+#view-settings{max-width:42rem}
+#view-settings>p a{color:var(--mn-accent)}
+.set-card{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--mn-space-3);min-width:0;margin:var(--mn-space-3) 0 0;padding:var(--mn-space-3);background:var(--mn-surface-1);border:1px solid var(--mn-border);border-radius:var(--mn-radius-md)}
+fieldset.set-types{display:block}
+.set-types legend{float:left;width:100%;margin:0 0 var(--mn-space-1);padding:0;font-weight:650}
+.set-list{clear:both;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,160px),1fr));gap:0 var(--mn-space-3)}
+label.set-check{flex-direction:row;align-items:center;gap:var(--mn-space-2);min-height:var(--mn-tap);color:var(--mn-text);font-size:var(--mn-text-md)}
+.set-check input{flex:none;width:20px;height:20px;margin:0;accent-color:var(--mn-accent)}
+.set-check input:disabled{opacity:.6}
+.set-types #nt-status{margin:var(--mn-space-1) 0 0}
+.set-types #nt-status:empty{display:none}
 .push-copy{min-width:0;flex:1 1 220px}
 .push-title{display:block;font-weight:650}
 .push-copy p{margin:.2em 0 0}

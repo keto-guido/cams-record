@@ -123,6 +123,15 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
             KEY idx_push_pauses_until (until_ts)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     ]),
+    # Which detection types (person, car, ...) each user wants as phone alerts, for all of their devices.
+    # No row = every type the user may receive (the behaviour before v9). Additive: no existing table changes.
+    (9, [
+        """CREATE TABLE IF NOT EXISTS push_preferences (
+            user_sub VARCHAR(128) NOT NULL PRIMARY KEY,
+            types_json VARCHAR(1024) NOT NULL,
+            updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    ]),
 ]
 
 _PUSH_COLUMNS = ("user_sub", "endpoint", "endpoint_hash", "p256dh", "auth", "user_agent", "roles_json", "roles_at")
@@ -136,7 +145,7 @@ def _push_row(r) -> dict:
 
 
 TABLES = ("segments", "recorder_status", "recorder_cameras", "push_subscriptions",
-          "push_sent_events", "push_pauses", "schema_version")
+          "push_sent_events", "push_pauses", "push_preferences", "schema_version")
 
 
 class Database:
@@ -485,6 +494,42 @@ class Database:
                 (str(event_id), camera_id))
             return n == 1
         return self.run(q)
+
+    # -- per-user alert types (cams_record.push) ---------------------------------
+    def push_preferences(self, user_subs: Iterable[str] | None = None) -> dict[str, list[str] | None]:
+        """Saved alert types per user. Users without a row are absent (= default, every allowed type).
+
+        A row whose JSON is unreadable maps to None, which callers treat like no row.
+        """
+        subs = sorted(set(user_subs)) if user_subs is not None else None
+        if subs == []:
+            return {}
+
+        def q(cur):
+            if subs is None:
+                cur.execute("SELECT user_sub, types_json FROM push_preferences")
+            else:
+                cur.execute("SELECT user_sub, types_json FROM push_preferences WHERE user_sub IN ("
+                            + ", ".join(["%s"] * len(subs)) + ")", subs)
+            out: dict[str, list[str] | None] = {}
+            for user_sub, raw in cur.fetchall():
+                try:
+                    types = json.loads(raw)
+                except ValueError:
+                    types = None
+                ok = isinstance(types, list) and all(isinstance(t, str) for t in types)
+                out[user_sub] = types if ok else None
+            return out
+        return self.run(q)
+
+    def set_push_preferences(self, user_sub: str, types: list[str]) -> None:
+        raw = json.dumps(sorted(set(types)))
+        self.run(lambda cur: cur.execute(
+            """INSERT INTO push_preferences (user_sub, types_json) VALUES (%s, %s)
+               ON DUPLICATE KEY UPDATE types_json=VALUES(types_json)""", (user_sub, raw)))
+
+    def clear_push_preferences(self, user_sub: str) -> int:
+        return self.run(lambda cur: cur.execute("DELETE FROM push_preferences WHERE user_sub=%s", (user_sub,)))
 
     # -- phone alert pauses (cams_record.pauses) ---------------------------------
     def active_push_pauses(self) -> list[dict]:

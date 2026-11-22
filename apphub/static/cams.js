@@ -1,5 +1,6 @@
 // /cams/ camera app: Cameras grid (snapshots + cams-detect motion overlay), Detections tab, per-camera page.
-// Routes (hash): "" grid, "#detections" all detections, "#cam=<id>" camera page (live view + its detections).
+// Routes (hash): "" grid, "#detections" all detections, "#cam=<id>" camera page (live view + its detections),
+// "#alerts" per-camera pauses, "#settings" notification settings (this device + alert types).
 (function () {
   'use strict';
   const $ = id => document.getElementById(id);
@@ -518,11 +519,11 @@
   window.addEventListener('pageshow',ev=>{if(!ev.persisted||route.view!=='cam'||!route.id)return;timelineStart(route.id);liveStart(route.id);});
 
 
-  // ---------- Web Push notification control ----------
+  // ---------- Web Push notification control (Settings view, #settings) ----------
   // iPhone/iPad only expose Notification + Push after the PWA is added to the Home Screen (standalone).
   // Safari in a normal browser tab cannot subscribe; the UI must say so explicitly.
   const CR_PUSH = CR + '/api/push';
-  const pushBar = $('push-bar'), pushStatus = $('push-status'), pushToggle = $('push-toggle'), pushTest = $('push-test');
+  const pushCard = $('push-card'), pushStatus = $('push-status'), pushToggle = $('push-toggle'), pushTest = $('push-test');
   const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
   const isIOS = IOS;
   function b64ToUint8(b64) {
@@ -558,8 +559,7 @@
     return reg.pushManager.getSubscription();
   }
   async function refreshPushUi() {
-    if (!pushBar) return;
-    pushBar.hidden = false;
+    if (!pushCard) return;
     const info = pushExplain();
     pushTest.hidden = true;
     if (info.state !== 'ready') {
@@ -655,7 +655,55 @@
       if (hash != null) location.hash = hash;
     }
   });
-  refreshPushUi();
+  refreshPushUi(); // on every open: GET /status also refreshes the roles cams-record filters alerts by
+
+  // ---------- alert types (cams-record /api/push/preferences) ----------
+  // Saved per user on the server, so the choice applies to every device; cams-record enforces it when it sends.
+  const NT = CR_PUSH + '/preferences';
+  const nt = { types: [], seq: 0, busy: false };
+  const ntList = $('nt-list'), ntStatus = $('nt-status');
+  function ntRender() {
+    ntList.replaceChildren(...nt.types.map(t => {
+      const row = document.createElement('label'), box = document.createElement('input');
+      row.className = 'set-check';
+      box.type = 'checkbox'; box.dataset.type = t.id; box.checked = !!t.enabled; box.disabled = nt.busy;
+      box.addEventListener('change', ntSave);
+      row.append(box, document.createTextNode(t.label));
+      return row;
+    }));
+  }
+  async function ntLoad() {
+    const seq = ++nt.seq;
+    ntStatus.textContent = 'Loading…';
+    try {
+      const j = await apJson(NT);
+      if (seq !== nt.seq) return;
+      nt.types = j.types || []; ntRender();
+      ntStatus.textContent = nt.types.some(t => !t.enabled) ? '' : 'You get alerts for every type.';
+    } catch (e) {
+      if (seq !== nt.seq) return;
+      nt.types = []; ntRender();
+      ntStatus.textContent = e.status === 404 ? 'Choosing alert types is not available on this server yet.'
+        : e.status === 503 ? 'Alert types are unavailable right now. Try again shortly.' : 'Could not load alert types.';
+    }
+  }
+  async function ntSave() {
+    const want = [...ntList.querySelectorAll('input[type="checkbox"]')].filter(b => b.checked).map(b => b.dataset.type);
+    const seq = ++nt.seq;
+    nt.busy = true; ntList.querySelectorAll('input').forEach(b => { b.disabled = true; });
+    ntStatus.textContent = 'Saving…';
+    try {
+      const j = await apJson(NT, { method: 'PUT', body: JSON.stringify({ types: want }) });
+      if (seq !== nt.seq) return;
+      nt.types = j.types || [];
+      ntStatus.textContent = want.length ? 'Saved. This applies to all your devices.' : 'Saved. You will not get detection alerts on any device.';
+    } catch (e) {
+      if (seq !== nt.seq) return;
+      ntStatus.textContent = 'Could not save: ' + (e.message || 'try again.');
+    } finally {
+      if (seq === nt.seq) { nt.busy = false; ntRender(); }
+    }
+  }
 
   // ---------- phone alert pause (cams-record /api/push/pauses) ----------
   // A pause silences one camera's phone notifications for everyone until it ends; recording, detections and Home
@@ -861,7 +909,7 @@
         const list = await fetch(CD + '/api/events?limit=50', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []);
         ev = (list || []).find(x => String(x.id) === eid) || null;
       }
-      if (!ev) { if (pushStatus) pushStatus.textContent = 'That detection is no longer available.'; return; }
+      if (!ev) { apSay('That detection is no longer available.'); return; }
       await cdReady;
       lbOpen(ev);
     } finally {
@@ -1159,6 +1207,7 @@
     if (ev) return { view: 'event', eventId: ev[1] };
     if (h === 'detections') return { view: 'det' };
     if (h === 'alerts') return { view: 'alerts' }; // App Hub's menu links here
+    if (h === 'settings') return { view: 'settings' };
     // Same id contract as camera-access.js / Admin (1–64): [a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?
     const m = h.match(/^cam=([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/);
     if (m && hubCams.some(c => c.id === m[1])) return { view: 'cam', id: m[1] };
@@ -1174,8 +1223,10 @@
     if (prev.view === 'cam' && (route.view !== 'cam' || route.id !== prev.id)) { liveStop(); timelineStop(); }
     if ((route.view === 'admin' || route.view === 'admin-edit') && !adm.ok) route = { view: 'grid' };  // not (yet) known to be an admin
     $('view-grid').hidden = route.view !== 'grid'; $('view-det').hidden = route.view !== 'det'; $('view-cam').hidden = route.view !== 'cam'; $('view-alerts').hidden = route.view !== 'alerts';
+    $('view-settings').hidden = route.view !== 'settings';
     $('view-admin').hidden = route.view !== 'admin'; $('view-admin-edit').hidden = route.view !== 'admin-edit';
     apClose(false); apRender(); if (route.view === 'alerts' && prev.view !== 'alerts') apLoad();
+    if (route.view === 'settings' && prev.view !== 'settings') { refreshPushUi(); ntLoad(); }
     $('cams-tabs').hidden = route.view === 'cam' || route.view === 'admin-edit';
     const tabView = route.view === 'admin-edit' ? 'admin' : route.view;
     document.querySelectorAll('.cams-tab').forEach(a => a.setAttribute('aria-current', a.dataset.view === tabView ? 'page' : 'false'));
@@ -1196,7 +1247,7 @@
         if (!camDet) { $('cam-off').hidden = false; $('cam-list').innerHTML = ''; return; }
         camList.reset(); evStart(camList);
       });
-    } else if (route.view !== 'admin' && route.view !== 'admin-edit') document.title = (route.view === 'alerts' ? 'Alerts · ' : '') + 'Cameras · MERSINO NETWORK';
+    } else if (route.view !== 'admin' && route.view !== 'admin-edit') document.title = (route.view === 'alerts' ? 'Alerts · ' : route.view === 'settings' ? 'Notifications · ' : '') + 'Cameras · MERSINO NETWORK';
   }
   tiles.forEach(t => t.addEventListener('click', () => { sessionStorage.setItem('cams-in-app', '1'); location.hash = 'cam=' + t.dataset.id; }));
   document.querySelectorAll('.cams-tab').forEach(a => a.addEventListener('click', () => sessionStorage.setItem('cams-in-app', '1')));

@@ -94,6 +94,9 @@ class FakeDB:
     def refresh_push_roles(self, user_sub, roles):
         return 0
 
+    def push_preferences(self, user_subs=None):
+        return {}
+
 
 def sub_row(user, roles):
     return {"user_sub": user, "endpoint": f"https://fcm.googleapis.com/fcm/send/{user}",
