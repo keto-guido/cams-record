@@ -21,12 +21,21 @@ for (const id of ['cam-video','cam-mode','cam-live','cam-retry','cam-fs','tl-dat
 assert(!/style=|<script>/.test(html));
 assert(/id="cam-retry" hidden>Couldn't load this recording\. Tap to retry\.</.test(html));
 assert(html.indexOf('hls.min.js?v=1.7.4') < html.indexOf('camera_audio.js?v=3'));
-assert(html.indexOf('camera_audio.js?v=3') < html.indexOf('cams.js?v=23'));
-assert(html.includes('cams.css?v=18'));
+assert(html.indexOf('camera_audio.js?v=3') < html.indexOf('cams.js?v=24'));
+assert(html.includes('cams.css?v=19'));
 // Live production (apphub 7c7d020) shipped cams.js?v=21 / cams.css?v=16; never go backwards.
-assert(!html.includes('cams.js?v=20') && !html.includes('cams.js?v=21') && !html.includes('cams.js?v=22'));
+assert(!html.includes('cams.js?v=20') && !html.includes('cams.js?v=21') && !html.includes('cams.js?v=22') && !html.includes('cams.js?v=23') && !html.includes('cams.css?v=18'));
 assert(html.includes('rel="manifest" href="/cams/manifest.webmanifest"'));
-assert(html.includes('id="push-bar"') && html.includes('id="push-toggle"') && html.includes('id="push-test"'));
+// Web Push control lives on the Settings view (#settings), not on the Live grid.
+assert(!html.includes('push-bar'), 'the push bar is gone from the camera page');
+const gridHtml = html.split('<section id="view-grid">')[1].split('</section>')[0];
+assert(!/push-|Detection alerts|nt-/.test(gridHtml), 'no notification controls on the Live grid');
+const settingsHtml = html.split('<section id="view-settings" hidden>')[1].split('</section>')[0];
+for (const id of ['push-card','push-status','push-toggle','push-test','nt-types','nt-list','nt-status']) assert(settingsHtml.includes('id="'+id+'"'), id);
+assert(settingsHtml.includes('>Notifications<') && settingsHtml.includes('>Alert me about<') && settingsHtml.includes('href="#alerts"'));
+assert(html.split('</nav>')[0].includes('<a class="cams-tab cams-gear" data-view="settings" href="#settings" id="tab-settings" aria-label="Notification settings"'), 'gear link in the camera page header');
+assert(html.split('id="tab-settings"')[1].split('</a>')[0].includes('<svg') && html.includes('>Settings</span>'));
+assert(!/audio|sound|transcript/i.test(settingsHtml), 'no sound alert option while sound detection is off');
 assert(html.includes('apple-mobile-web-app-capable'));
 // Shared navigation: the hub's page() renders the bar from these; sections use the one sub-nav pattern.
 assert.deepEqual(pageOptions, {app:'cams',name:'Cameras'});
@@ -57,6 +66,17 @@ assert(client.split('async function saveShare')[1].split('await ')[1].startsWith
 assert(client.includes('MAX_SHARE = 250e6'));
 assert(client.includes("register('/cams/sw.js'") && client.includes('#event='));
 assert(client.includes('Add to Home Screen') && client.includes('normal tab'));
+// Same enable/disable/test flow as before, now bound to the Settings card.
+const pushPart = client.split('// ---------- Web Push notification control')[1].split('// ---------- phone alert pause')[0];
+assert(pushPart.includes("$('push-card')") && !pushPart.includes('push-bar'));
+for (const s of ['async function enablePush','async function disablePush',"CR_PUSH + '/vapid-public-key'","CR_PUSH + '/subscribe'","CR_PUSH + '/test'",'Notification.requestPermission()','userVisibleOnly: true']) assert(pushPart.includes(s), s);
+assert(pushPart.includes('\n  refreshPushUi(); //'), 'status (and the roles refresh) still runs on every open');
+// Alert types: loaded from and saved to cams-record, per user; built with DOM APIs, never HTML.
+assert(pushPart.includes("NT = CR_PUSH + '/preferences'") && pushPart.includes("method: 'PUT'") && pushPart.includes('JSON.stringify({ types: want })'));
+assert(pushPart.includes("box.type = 'checkbox'") && pushPart.includes('box.dataset.type = t.id') && !/innerHTML|insertAdjacentHTML|outerHTML/.test(pushPart));
+assert(client.includes("h === 'settings'") && client.includes("view: 'settings'") && client.includes("$('view-settings').hidden"));
+assert(client.includes("route.view === 'settings' && prev.view !== 'settings'") && client.includes('ntLoad()'));
+assert(!client.includes("$('push-bar')"));
 assert(client.includes('event=([^&]+)'), 'deep link must accept string event ids');
 assert(client.includes('encodeURIComponent(eid)'));
 // Push deep-link: #event=<uid> -> /api/push/event-context -> lbOpen, with real snapshot flags (not hard-coded true).
@@ -78,6 +98,7 @@ assert(client.includes("'1h'") && client.includes("'3h'") && client.includes("'m
 assert(client.includes('can_edit') && client.includes('Paused until '));
 const css = fs.readFileSync(path.join(__dirname, 'static', 'cams.css'), 'utf8');
 assert(css.includes('/* ---------- phone alert pause'));
+assert(css.includes('/* ---------- notification settings') && css.includes('.set-card{') && css.includes('a.cams-tab.cams-gear{') && !css.includes('.push-bar'));
 assert((css.match(/\.ap-[a-z0-9-]+/g) || []).length >= 36, 'must ship the .ap-* CSS rules from live v=16');
 assert(css.includes('.camcell{') && css.includes('.ap-bell') && css.includes('.ap-menu') && css.includes('.ap-toast'));
 // 3) bfcache: pagehide stops timeline; pageshow(persisted) on #cam= restarts.

@@ -143,6 +143,7 @@ def test_every_camera_route_is_covered(setup):
     camera_free = {"/cams-record/healthz", "/cams-record/api/status", "/cams-record/api/metrics",
                    "/cams-record/api/push/vapid-public-key", "/cams-record/api/push/status",
                    "/cams-record/api/push/subscribe", "/cams-record/api/push/test",
+                   "/cams-record/api/push/preferences",  # per user; camera access is applied at fan-out
                    "/cams-record/api/push/event-context/{event_id}", "/cams-record/api/internal/detection-event"}
     covered = {"/cams-record" + u.split("?")[0].replace("{c}", "{cam}").replace("seg/1.ts", "seg/{segment_id}.ts")
                for u in CAMERA_ROUTES}

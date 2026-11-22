@@ -329,6 +329,40 @@ def create_app(service, cfg: dict):
         except PushError as exc:
             raise HTTPException(exc.status, exc.detail) from exc
 
+    # ---- alert types (cams_record/push.py): per user, for all of that user's devices ----
+    def same_origin(request: Request) -> None:
+        site = request.headers.get("sec-fetch-site")
+        if site and site not in ("same-origin", "none"):
+            raise HTTPException(403, "cross-site request refused")
+
+    def push_call(fn, *args):
+        try:
+            return JSONResponse(fn(*args), headers=PRIVATE_NO_STORE)
+        except PushError as exc:
+            raise HTTPException(exc.status, exc.detail) from exc
+        except DBUnavailable as exc:
+            raise HTTPException(503, "database unavailable") from exc
+
+    @r.get("/api/push/preferences")
+    def push_preferences(user: Principal = Depends(clip_user)):
+        return push_call(push.preferences_for, user.sub, tuple(user.roles))
+
+    @r.put("/api/push/preferences")
+    async def push_preferences_set(request: Request, user: Principal = Depends(clip_user)):
+        same_origin(request)
+        if (request.headers.get("content-type") or "").split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(415, "send JSON")
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "invalid JSON") from exc
+        return await run_in_threadpool(push_call, push.set_preferences, user.sub, body, tuple(user.roles))
+
+    @r.delete("/api/push/preferences")
+    def push_preferences_reset(request: Request, user: Principal = Depends(clip_user)):
+        same_origin(request)
+        return push_call(push.reset_preferences, user.sub, tuple(user.roles))
+
     # ---- phone alert pauses (cams_record/pauses.py): per camera, for every subscriber ----
     # Anyone who can view a camera sees whether its alerts are paused; only its owners (users named
     # in the registry entry) and admins change that. Cameras the viewer cannot see are never listed,
@@ -351,9 +385,7 @@ def create_app(service, cfg: dict):
 
     def pause_target(request: Request, cam: str, who: Viewer) -> str:
         """Checks shared by PUT and DELETE; returns the camera's name."""
-        site = request.headers.get("sec-fetch-site")
-        if site and site not in ("same-origin", "none"):
-            raise HTTPException(403, "cross-site request refused")
+        same_origin(request)
         if pauses is None:
             raise HTTPException(503, "alert pauses need the database")
         if not CAMERA_ID_RE.fullmatch(cam):

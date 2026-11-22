@@ -75,6 +75,20 @@ function audioApi(req,res,p,json){
     // Docs: successful PATCH returns the source object itself.
     json(audioSource(id,cur));});
 }
+// Mirrors cams_record/push.py ALERT_TYPES and /api/push/preferences (GET/PUT/DELETE).
+const alertTypes=[['person','People'],['car','Cars'],['dog','Dogs'],['cat','Cats'],['other','Other detections']];
+let alertChoice=null; // null = default: every type
+function pushApi(req,res,p,json){
+  const prefs=()=>({default:alertChoice==null,types:alertTypes.map(([id,label])=>({id,label,enabled:alertChoice==null||alertChoice.includes(id)}))});
+  if(p==='/cams-record/api/push/status')return json({configured:true,vapid_public_key:null,subscribed:false,subscription_count:0,endpoint_subscribed:null});
+  if(p==='/cams-record/api/push/pauses')return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
+  if(p!=='/cams-record/api/push/preferences')return send(res,404,JSON.stringify({detail:'not found'}),'application/json');
+  if(req.method==='GET')return json(prefs());
+  if(req.method==='DELETE'){alertChoice=null;return json(prefs());}
+  let body='';req.on('data',d=>body+=d);req.on('end',()=>{let b;try{b=JSON.parse(body||'{}');}catch(e){return send(res,400,JSON.stringify({detail:'invalid JSON'}),'application/json');}
+    if(!b||!Array.isArray(b.types)||b.types.some(t=>!alertTypes.some(([id])=>id===t)))return send(res,422,JSON.stringify({detail:'unknown alert type'}),'application/json');
+    alertChoice=[...new Set(b.types)];json(prefs());});
+}
 function admin(req,res,p,q,json){
   const fail=(code,detail)=>send(res,code,JSON.stringify({detail}),'application/json');
   const list=()=>Object.values(adminDb.cams).sort((a,b)=>a.sort_order-b.sort_order);
@@ -119,6 +133,8 @@ const server=http.createServer((req,res)=>{const u=new URL(req.url,'http://local
   // cams-audio mock. PREVIEW_AUDIO=installed|missing (default installed).
   if(p.startsWith('/cams-audio/'))return audioApi(req,res,p,json);
   if(p==='/cams-detect/api/status')return json({service:{camera_source:{mode:MODE,differences:MODE==='shadow'?['back-door: decode_fps differ between cameras.yaml and cams_config']:undefined,fallback_to_files:false,skipped:[]}}});
+  // Web Push settings (#settings): status and per-user alert types, in memory. No real push is sent.
+  if(p.startsWith('/cams-record/api/push/'))return pushApi(req,res,p,json);
   if(p.startsWith('/cams-record/'))return send(res,404,'Preview has no media files');
   return app.handle(req,res,{user:'Preview',csrf:'preview'},p,u);
 });

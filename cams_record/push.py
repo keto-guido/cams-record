@@ -37,6 +37,35 @@ _ENDPOINT_HOST_OK = re.compile(
 )
 
 
+# Detection types a user can choose to be alerted about, in display order. cams-detect's default classes
+# (cams_detect/config.py detection.classes) are person, car, dog and cat; any other class a camera is
+# configured for arrives as "other". Sound/audio detections are deliberately absent (sound detection is off).
+ALERT_TYPES: tuple[tuple[str, str], ...] = (
+    ("person", "People"),
+    ("car", "Cars"),
+    ("dog", "Dogs"),
+    ("cat", "Cats"),
+    ("other", "Other detections"),
+)
+ALERT_TYPE_IDS: tuple[str, ...] = tuple(t for t, _ in ALERT_TYPES)
+
+
+def alert_type(label) -> str:
+    """The alert type a cams-detect label belongs to."""
+    lab = str(label or "").strip().lower()
+    return lab if lab in ALERT_TYPE_IDS else "other"
+
+
+def allowed_alert_types(roles=()) -> tuple[str, ...]:
+    """Types this user may choose. Every user gets all of them today; a future admin-only type goes here."""
+    return ALERT_TYPE_IDS
+
+
+def wants_alert(saved: list[str] | None, typ: str) -> bool:
+    """None (no saved choice, or an unreadable one) means every type, the behaviour before preferences."""
+    return saved is None or typ in saved
+
+
 class PushError(Exception):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
@@ -280,6 +309,39 @@ class PushService:
         return self.access.can_view_camera(camera_id, Viewer(str(row.get("user_sub") or ""),
                                                              self.subscriber_roles(row)))
 
+    # ---- per-user alert types (push_preferences, migration v9) ----
+    def preferences_for(self, user_sub: str, roles=()) -> dict:
+        if self.db is None:
+            raise PushError(503, "database unavailable")
+        saved = self.db.push_preferences([user_sub]).get(user_sub)
+        allowed = allowed_alert_types(roles)
+        return {
+            "default": saved is None,
+            "types": [{"id": t, "label": label, "enabled": wants_alert(saved, t)}
+                      for t, label in ALERT_TYPES if t in allowed],
+        }
+
+    def set_preferences(self, user_sub: str, body, roles=()) -> dict:
+        if self.db is None:
+            raise PushError(503, "database unavailable")
+        if not isinstance(body, dict) or set(body) != {"types"} or not isinstance(body["types"], list):
+            raise PushError(422, 'expected {"types": ["person", ...]}')
+        allowed = allowed_alert_types(roles)
+        types = body["types"]
+        if len(types) > len(ALERT_TYPE_IDS):
+            raise PushError(422, "too many alert types")
+        for t in types:
+            if not isinstance(t, str) or t not in allowed:
+                raise PushError(422, "unknown alert type")
+        self.db.set_push_preferences(user_sub, list(dict.fromkeys(types)))
+        return self.preferences_for(user_sub, roles)
+
+    def reset_preferences(self, user_sub: str, roles=()) -> dict:
+        if self.db is None:
+            raise PushError(503, "database unavailable")
+        self.db.clear_push_preferences(user_sub)
+        return self.preferences_for(user_sub, roles)
+
     def remove(self, user_sub: str, endpoint: str) -> dict:
         if self.db is None:
             raise PushError(503, "database unavailable")
@@ -355,15 +417,22 @@ class PushService:
             allowed = [r for r in rows if self.may_receive(r, event.camera_id)]
         else:
             allowed = rows
+        # Camera access first, then each user's chosen alert types (no saved choice = every type).
+        wanted = allowed
+        if not test and allowed:
+            typ = alert_type(event.label)
+            prefs = self.db.push_preferences({str(r.get("user_sub") or "") for r in allowed})
+            wanted = [r for r in allowed if wants_alert(prefs.get(str(r.get("user_sub") or "")), typ)]
         sent = failed = 0
-        for row in allowed:
+        for row in wanted:
             ok, _ = self.send_raw(row, payload)
             if ok:
                 sent += 1
             else:
                 failed += 1
         return {"ok": True, "sent": sent, "failed": failed, "subscribers": len(rows),
-                "filtered": len(rows) - len(allowed), "event_id": event.id, "payload_url": payload["url"]}
+                "filtered": len(rows) - len(allowed), "type_filtered": len(allowed) - len(wanted),
+                "event_id": event.id, "payload_url": payload["url"]}
 
     def notify_user(self, user_sub: str, event: DetectionEvent, *, test: bool = True) -> dict:
         if not self.enabled:

@@ -10,9 +10,9 @@ and must never be committed.**
 
 | Layer | Location | Role |
 |---|---|---|
-| PWA UI + SW | `apphub/` | Manifest, `/cams/sw.js`, subscribe/unsubscribe control, `#event=<id>` deep link |
+| PWA UI + SW | `apphub/` | Manifest, `/cams/sw.js`, Settings view `#settings` (subscribe/unsubscribe/test, alert types), `#event=<id>` deep link |
 | API + storage | `cams_record/` | VAPID, subscription CRUD, test send (own subs only), event context, webhook, poller |
-| Schema | migrations **v5**, **v6**, **v7** | `push_subscriptions` (v7 adds `roles_json`, `roles_at`); `push_sent_events` (dedupe; `event_id` is `VARCHAR(64)` after v6) |
+| Schema | migrations **v5**, **v6**, **v7**, **v9** | `push_subscriptions` (v7 adds `roles_json`, `roles_at`); `push_sent_events` (dedupe; `event_id` is `VARCHAR(64)` after v6); `push_preferences` (v9, per-user alert types) |
 
 There is **no public send endpoint**. User routes require the App Hub
 `x-apphub-token` with role `admin` or `cams`. The detection webhook requires
@@ -59,8 +59,9 @@ There is **no public send endpoint**. User routes require the App Hub
    include `web push: enabled` when the private key file is readable.
 6. **iPhone / iPad**: users must **Add to Home Screen** the Cameras PWA, then open
    that Home Screen icon (standalone display). Safari in a normal browser tab
-   **cannot** subscribe to Web Push on iOS/iPadOS. The Live view control explains
-   this; it does not imply tab Safari supports iPhone push.
+   **cannot** subscribe to Web Push on iOS/iPadOS. The Settings view (gear in the
+   Cameras header, `/cams/#settings`) explains this; it does not imply tab Safari
+   supports iPhone push.
 
 ## HTTP API (cams-record)
 
@@ -74,6 +75,9 @@ unless noted.
 | POST | `/api/push/subscribe` | cams/admin | Upsert this user’s subscription (`endpoint`, `keys`) |
 | DELETE | `/api/push/subscribe` | cams/admin | Remove this user’s endpoint only |
 | POST | `/api/push/test` | cams/admin | Test notification to **this user’s** subscriptions only |
+| GET | `/api/push/preferences` | cams/admin | This user’s alert types (see *Alert types*) |
+| PUT | `/api/push/preferences` | cams/admin | Save `{"types": [...]}` for all of this user’s devices; JSON only, same-origin |
+| DELETE | `/api/push/preferences` | cams/admin | Forget the saved choice (back to every type) |
 | GET | `/api/push/event-context/{id}` | cams/admin | Metadata for deep link (no images) |
 | POST | `/api/internal/detection-event` | `x-cams-push-secret` | cams-detect → record event (deduped) |
 
@@ -99,9 +103,49 @@ rule as everything else (`docs/camera-access.md`): the camera id must be in `cam
   admins included. The first such event per camera logs
   `push: camera <id> is not in the camera registry; nobody is notified for it`.
 - `access.enforce: false` (development only) sends every alert to every subscriber, as before.
+- The subscriber must also want the event's **type** (next section). Camera access is checked first;
+  a type choice can only narrow who is notified, never widen it.
 - `POST /api/push/test` is not filtered: it only reaches the caller's own devices.
 - A camera whose alerts are **paused** (`docs/alert-pause.md`) notifies nobody until the pause ends;
   its events are still claimed, so no backlog is sent on resume. Test pushes ignore pauses.
+
+## Alert types
+
+Each user chooses which detection types send them phone alerts, on the Settings view
+(`/cams/#settings`). The choice is stored server-side per App Hub `sub`, so it applies to all of
+that user's devices, and is enforced by cams-record when it sends (both poller and webhook).
+
+| type | cams-detect labels |
+|---|---|
+| `person` | `person` |
+| `car` | `car` |
+| `dog` | `dog` |
+| `cat` | `cat` |
+| `other` | any other label (e.g. a camera configured for `truck` or `bird`) |
+
+These are cams-detect's default classes (`detection.classes` in cams-detect's config). Sound/audio
+detections are not offered: sound detection is off.
+
+- **Default**: a user with no saved choice (no `push_preferences` row, or an unreadable one) gets
+  every type, exactly as before v9. `DELETE /api/push/preferences` returns to that.
+- **Storage** (migration v9, additive):
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS push_preferences (
+      user_sub VARCHAR(128) NOT NULL PRIMARY KEY,
+      types_json VARCHAR(1024) NOT NULL,
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  ```
+
+- **API**: `GET` answers
+  `{"default": true, "types": [{"id": "person", "label": "People", "enabled": true}, ...]}`;
+  `PUT` takes exactly `{"types": ["person", "car"]}` (an empty list turns every type off) and
+  answers like `GET`. Unknown types, wrong shapes, non-JSON bodies (415) and cross-site requests
+  (403) are refused; nothing is stored then.
+- An event whose type the user did not choose is still **claimed**, like a paused camera's, so
+  changing the choice later never releases old alerts. Send results report `type_filtered`.
+- `push.labels` (config) still applies first, globally, in the poller.
 
 ## Detection integration
 

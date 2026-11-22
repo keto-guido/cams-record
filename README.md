@@ -190,6 +190,7 @@ its tables itself. Migrations are tracked in `schema_version`, the same way as i
 | `push_subscriptions` | Web Push endpoints bound to App Hub JWT `sub` (schema v5) |
 | `push_sent_events` | detection `event_id` claim table to avoid duplicate alerts (schema v5; `event_id` widened to `VARCHAR(64)` in v6 for string cams_detect `events.event_uid` values) |
 | `push_pauses` | per-camera phone alert pause: `camera_id` (PK), `until_ts`, `set_by`, `set_at` (schema v8); see [`docs/alert-pause.md`](docs/alert-pause.md) |
+| `push_preferences` | per-user alert types: `user_sub` (PK), `types_json`, `updated_at` (schema v9); no row = every type; see [`docs/web-push.md`](docs/web-push.md) |
 
 `segments` has `UNIQUE(camera_id, quality, start_ts)`, `INDEX(camera_id, quality, start_ts,
 end_ts)`, `INDEX(end_ts)`, `INDEX(path)` and `INDEX(deleted_at, quality, start_ts)`. The path index
@@ -385,6 +386,7 @@ These routes are served on `127.0.0.1:8097`, under `/cams-record` (the prefix is
 | `GET /api/status` | admin JWT | per camera/quality: `state` (`starting`/`recording`/`backoff`/`disk_full`/`stopped`), `video_codec`, `last_segment_ts`, `last_segment_age_s`, `mb_per_hour`, `restarts_24h`, `last_error`; also disk free on the root and the disk guard state, indexer queue, DB state, last reconcile, `retention` (below) |
 | `GET /api/metrics` | admin JWT | Prometheus text: restarts, segments, last segment age, disk free, disk guard, index backlog, `cams_record_retention_*` |
 | `GET/POST/DELETE /api/push/*` | cams or admin JWT | Web Push subscribe/status/test/event-context; see [Web Push](#web-push-detection-alerts) |
+| `GET/PUT/DELETE /api/push/preferences` | cams or admin JWT; own preferences only | which detection types alert this user on all devices |
 | `GET /api/push/pauses`, `PUT/DELETE /api/push/pauses/{cam}` | cams or admin JWT; writes: camera owners and admins | per-camera phone alert pause; see [`docs/alert-pause.md`](docs/alert-pause.md) |
 | `POST /api/internal/detection-event` | `x-cams-push-secret` | cams-detect webhook only; not a public send API |
 
@@ -416,8 +418,12 @@ iOS Home Screen requirements, schema v5, and the cams-detect webhook contract ar
 
 Summary:
 
-- **Frontend** (`apphub/`): service worker at `/cams/sw.js`, manifest, notification control
-  on the Live view (subscribe / unsubscribe / test), deep link `#event=<id>`.
+- **Frontend** (`apphub/`): service worker at `/cams/sw.js`, manifest, notification settings
+  at `/cams/#settings` (gear in the Cameras header: subscribe / unsubscribe / test this device,
+  and which detection types to be alerted about), deep link `#event=<id>`.
+- **Alert types**: each user picks person / car / dog / cat / other once for all of their devices
+  (`push_preferences`, schema v9; no saved choice = every type). Enforced server-side at send time,
+  after the per-camera access check.
 - **Backend** (`cams-record`): stores subscriptions per JWT `sub`, sends on new
   `cams_detect.events` (poller and/or internal webhook), prunes 404/410 endpoints,
   dedupes by `event_id`. Private VAPID key stays in `secrets/vapid_private_key`.
